@@ -4,7 +4,7 @@
  * Supports password auth and RSA key-pair JWT auth.
  */
 
-import { createSign, createHash } from "node:crypto";
+import { createSign, createHash, createPublicKey } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 interface SnowflakeConfig {
@@ -114,7 +114,6 @@ function base64url(input: string | Buffer): string {
 }
 
 function extractPublicKeyDer(privatePem: string): Buffer {
-  const { createPublicKey } = require("node:crypto") as typeof import("node:crypto");
   const pubKey = createPublicKey(privatePem);
   return pubKey.export({ type: "spki", format: "der" }) as Buffer;
 }
@@ -324,6 +323,86 @@ export async function fetchSchemas(
   return schemas;
 }
 
+export interface TableAnomalyResult {
+  table: string;
+  rowCount: number;
+  prevRowCount: number | null;
+  pctChange: number | null;
+  anomalyDetected: boolean;
+  anomalyDescription: string | null;
+}
+
+export interface QueryPlanSummary {
+  queryId: string;
+  queryText: string;
+  warehouse: string;
+  runtimeSeconds: number;
+  creditsConsumed: number;
+}
+
+// Check row counts and basic stats for specified tables to detect data anomalies.
+// Called by incident-autopilot to cross-reference Airflow failures with data issues.
+export async function checkSourceAnomalies(
+  config: SnowflakeConfig,
+  tables: string[]  // "SCHEMA.TABLE" or "DATABASE.SCHEMA.TABLE"
+): Promise<TableAnomalyResult[]> {
+  if (tables.length === 0) {
+    // If no tables specified, check the configured database for recently modified tables
+    const recentSql = `
+      SELECT table_schema || '.' || table_name as full_table
+      FROM ${config.database}.INFORMATION_SCHEMA.TABLES
+      WHERE last_altered >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+        AND table_type = 'BASE TABLE'
+      LIMIT 10
+    `;
+    try {
+      const rows = await executeQuery(config, recentSql);
+      tables = rows.map(r => `${config.database}.${String(r.FULL_TABLE)}`);
+    } catch {
+      return [];
+    }
+  }
+
+  const results: TableAnomalyResult[] = [];
+
+  for (const tableRef of tables.slice(0, 10)) {
+    const parts = tableRef.split(".");
+    const db     = parts.length === 3 ? parts[0] : config.database;
+    const schema = parts.length === 3 ? parts[1] : parts[0];
+    const table  = parts[parts.length - 1];
+
+    try {
+      validateIdentifier(db, "database");
+      validateIdentifier(schema, "schema");
+      validateIdentifier(table, "table");
+
+      const countSql = `SELECT COUNT(*) AS ROW_COUNT FROM ${db}.${schema}.${table}`;
+      const rows = await executeQuery(config, countSql);
+      const rowCount = Number(rows[0]?.ROW_COUNT ?? 0);
+
+      results.push({
+        table: `${db}.${schema}.${table}`,
+        rowCount,
+        prevRowCount: null,
+        pctChange: null,
+        anomalyDetected: rowCount === 0,
+        anomalyDescription: rowCount === 0 ? `Table ${table} has 0 rows — may indicate a load failure` : null,
+      });
+    } catch (err) {
+      results.push({
+        table: tableRef,
+        rowCount: -1,
+        prevRowCount: null,
+        pctChange: null,
+        anomalyDetected: false,
+        anomalyDescription: `Could not query: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  return results;
+}
+
 export async function getQueryProfile(
   config: SnowflakeConfig,
   queryId: string
@@ -337,4 +416,61 @@ export async function getQueryProfile(
 
   const rows = await executeQuery(config, sql);
   return { queryId, operators: rows };
+}
+
+export async function getQueryPlans(
+  config: SnowflakeConfig,
+  entity: string,
+  limit = 10
+): Promise<QueryPlanSummary[]> {
+  const safeLimit = Math.max(1, Math.min(limit, 20));
+  const escapedEntity = entity.replace(/'/g, "''");
+  const sql = `
+    SELECT query_id, query_text, warehouse_name,
+           total_elapsed_time/1000 AS runtime_seconds,
+           credits_used_cloud_services AS credits_consumed
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE start_time >= DATEADD('day', -7, CURRENT_TIMESTAMP())
+      AND query_text ILIKE '%${escapedEntity}%'
+    ORDER BY total_elapsed_time DESC
+    LIMIT ${safeLimit}
+  `;
+
+  try {
+    const rows = await executeQuery(config, sql);
+    return rows.map((row) => ({
+      queryId: String(row.QUERY_ID ?? ""),
+      queryText: String(row.QUERY_TEXT ?? ""),
+      warehouse: String(row.WAREHOUSE_NAME ?? ""),
+      runtimeSeconds: Number(row.RUNTIME_SECONDS ?? 0),
+      creditsConsumed: Number(row.CREDITS_CONSUMED ?? 0),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export async function analyzeQueryPerformance(
+  _config: SnowflakeConfig,
+  entity: string,
+  plans: Array<QueryPlanSummary | Record<string, unknown>>
+): Promise<{ explanation: string; rewrittenSql: string; estimatedSavings: number }> {
+  const summaries = plans.map((plan) => ({
+    queryId: String((plan as QueryPlanSummary).queryId ?? (plan as Record<string, unknown>).queryId ?? ""),
+    queryText: String((plan as QueryPlanSummary).queryText ?? (plan as Record<string, unknown>).queryText ?? ""),
+    runtimeSeconds: Number((plan as QueryPlanSummary).runtimeSeconds ?? (plan as Record<string, unknown>).runtimeSeconds ?? 0),
+    creditsConsumed: Number((plan as QueryPlanSummary).creditsConsumed ?? (plan as Record<string, unknown>).creditsConsumed ?? 0),
+  }));
+
+  const slowest = summaries.sort((left, right) => right.runtimeSeconds - left.runtimeSeconds)[0];
+  const explanation = slowest
+    ? `Queries touching ${entity} appear dominated by long-running scans. The slowest query (${slowest.queryId || "unknown"}) ran for ${Math.round(slowest.runtimeSeconds)}s and consumed ${slowest.creditsConsumed.toFixed(2)} credits.`
+    : `No recent query plans were found for ${entity}. Query performance should be investigated with a narrower time window or a more specific entity name.`;
+
+  const rewrittenSql = slowest?.queryText
+    ? `${slowest.queryText.trim()}\n-- Suggested optimization: project only needed columns and add a selective predicate before joins.`
+    : `SELECT *\nFROM ${entity}\nWHERE /* add a selective predicate */ 1 = 1;`;
+
+  const estimatedSavings = slowest ? Math.max(1, Math.round(slowest.creditsConsumed * 0.25)) : 0;
+  return { explanation, rewrittenSql, estimatedSavings };
 }

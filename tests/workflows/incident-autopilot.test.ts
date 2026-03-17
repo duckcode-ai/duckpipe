@@ -101,6 +101,9 @@ describe("incident-autopilot workflow", () => {
 
     expect(result.status).toBe("completed");
     expect(result.workflow).toBe("incident-autopilot");
+    expect((result.agentResults.incidentContext as { impact?: { blastRadius?: unknown[]; likelyOwner?: string; runbook?: string } }).impact?.blastRadius?.length).toBeGreaterThan(0);
+    expect((result.agentResults.incidentContext as { impact?: { likelyOwner?: string } }).impact?.likelyOwner).toBeTruthy();
+    expect((result.agentResults.incidentContext as { impact?: { runbook?: string } }).impact?.runbook).toBeTruthy();
 
     // Should have dispatched to airflow agent (read-only)
     const airflowMsgs = transport.getMessagesSentTo("airflow");

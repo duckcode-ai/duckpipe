@@ -1,6 +1,8 @@
 import type { DuckpipeConfig, TrustTier } from "./types.js";
 import type { VaultBackend } from "./types.js";
 import { resolveConfigValue } from "./vault.js";
+import { getActiveLlmProviderName } from "./llm.js";
+import { assertWorkflowToolContracts, buildAssistantReadinessReport } from "./registry.js";
 
 export interface VerifyResult {
   integration: string;
@@ -17,6 +19,7 @@ export async function verifyAll(
   config: DuckpipeConfig,
   vault: VaultBackend
 ): Promise<VerifyResult[]> {
+  assertWorkflowToolContracts(config);
   const results: VerifyResult[] = [];
 
   console.log("DuckPipe connection verify — checking your integrations...\n");
@@ -57,7 +60,7 @@ export async function verifyAll(
     results.push(notConfigured("Confluence"));
   }
 
-  printResults(results, config.duckpipe.trust_tier);
+  printResults(results, config.duckpipe.trust_tier, config);
   return results;
 }
 
@@ -66,6 +69,7 @@ export async function verifySingle(
   config: DuckpipeConfig,
   vault: VaultBackend
 ): Promise<VerifyResult> {
+  assertWorkflowToolContracts(config);
   const verifiers: Record<
     string,
     (c: DuckpipeConfig, v: VaultBackend) => Promise<VerifyResult>
@@ -90,7 +94,7 @@ export async function verifySingle(
   }
 
   const result = await fn(config, vault);
-  printResults([result], config.duckpipe.trust_tier);
+  printResults([result], config.duckpipe.trust_tier, config);
   return result;
 }
 
@@ -245,6 +249,31 @@ async function verifyDbt(
 ): Promise<VerifyResult> {
   const dbt = config.integrations.dbt;
   if (!dbt) return notConfigured("dbt Cloud");
+
+  // Local manifest mode — no API call needed
+  if (dbt.local_manifest_path) {
+    const { existsSync } = await import("node:fs");
+    if (existsSync(dbt.local_manifest_path)) {
+      return {
+        integration: "dbt",
+        status: "connected",
+        details: [`Local manifest: ${dbt.local_manifest_path}`, "Schema drift detection enabled"],
+        permissions: { "read:manifest": true },
+      };
+    }
+    return {
+      integration: "dbt",
+      status: "failed",
+      details: [],
+      permissions: {},
+      error: `manifest.json not found at: ${dbt.local_manifest_path}\nRun 'dbt compile' in your dbt project first.`,
+      fixUrl: "https://docs.getdbt.com/reference/commands/compile",
+    };
+  }
+
+  if (!dbt.api_token || !dbt.account_id) {
+    return notConfigured("dbt Cloud");
+  }
 
   try {
     const token = await resolveConfigValue(vault, dbt.api_token);
@@ -437,7 +466,7 @@ function notConfigured(name: string): VerifyResult {
   };
 }
 
-function printResults(results: VerifyResult[], tier: TrustTier): void {
+function printResults(results: VerifyResult[], tier: TrustTier, config: DuckpipeConfig): void {
   for (const r of results) {
     if (r.status === "connected") {
       const version = r.version ? ` (version ${r.version})` : "";
@@ -454,6 +483,27 @@ function printResults(results: VerifyResult[], tier: TrustTier): void {
     }
     console.log();
   }
+
+  // LLM provider status
+  const llmProvider = getActiveLlmProviderName();
+  const llmLabels: Record<string, string> = {
+    anthropic: "Anthropic Claude",
+    openai: "OpenAI GPT",
+    gemini: "Google Gemini",
+  };
+  if (llmProvider) {
+    console.log(`✓ LLM provider: ${llmLabels[llmProvider] ?? llmProvider}`);
+  } else {
+    console.log(`⚠ No LLM provider configured`);
+    console.log(`  Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY in .env`);
+  }
+  console.log();
+
+  const readiness = buildAssistantReadinessReport(config as DuckpipeConfig);
+  for (const warning of readiness.warnings) {
+    console.log(`⚠ ${warning}`);
+  }
+  if (readiness.warnings.length > 0) console.log();
 
   const tierName =
     tier === 1 ? "read-only" : tier === 2 ? "supervised writes" : "autonomous";

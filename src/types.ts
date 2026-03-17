@@ -90,6 +90,264 @@ export interface WorkflowResult {
   error?: string;
 }
 
+export interface AssetRef {
+  kind:
+    | "dag"
+    | "task"
+    | "table"
+    | "model"
+    | "query"
+    | "slack_thread"
+    | "jira_issue"
+    | "confluence_page"
+    | "runbook"
+    | "owner";
+  name: string;
+  externalId?: string;
+  database?: string;
+  schema?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface EntityGraphNode {
+  id: string;
+  kind: AssetRef["kind"];
+  name: string;
+}
+
+export interface EntityGraphEdge {
+  from: string;
+  to: string;
+  relation: "contains" | "reads" | "writes" | "depends_on" | "alerts" | "owns" | "references";
+}
+
+export interface EntityGraph {
+  nodes: EntityGraphNode[];
+  edges: EntityGraphEdge[];
+}
+
+export interface IncidentEvidence {
+  id: string;
+  source: AgentName | "workflow" | "system";
+  kind:
+    | "log"
+    | "metric"
+    | "change"
+    | "anomaly"
+    | "lineage"
+    | "history"
+    | "policy"
+    | "summary";
+  summary: string;
+  detail?: string;
+  confidence: "high" | "medium" | "low";
+  asset?: AssetRef;
+}
+
+export interface CauseAssessment {
+  id: string;
+  category:
+    | "timeout"
+    | "connection_error"
+    | "logic_error"
+    | "upstream_dependency"
+    | "data_anomaly"
+    | "schema_drift"
+    | "performance"
+    | "unknown";
+  summary: string;
+  confidence: "high" | "medium" | "low";
+  evidenceIds: string[];
+  inference?: string;
+}
+
+export interface RecommendedAction {
+  summary: string;
+  priority: "immediate" | "next" | "follow_up";
+  owner?: string;
+  mode?: "read-only" | "approval-required" | "autonomous";
+}
+
+export interface ImpactSummary {
+  severity: "P1" | "P2" | "P3";
+  affectedDags: string[];
+  affectedTables: string[];
+  affectedModels: string[];
+  blastRadius: AssetRef[];
+  likelyOwner?: string;
+  runbook?: string;
+}
+
+export interface StoryOutput {
+  oncallSummary: string;
+  managerSummary: string;
+  knowledgeSummary: string;
+  topEvidence: string[];
+  unknowns: string[];
+}
+
+export interface IncidentChatMessage {
+  id: string;
+  incidentRunId: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: string;
+  metadata?: {
+    sources?: string[];
+    evidenceIds?: string[];
+    followUps?: string[];
+    usedLiveData?: boolean;
+    investigation?: InvestigationResult;
+  };
+}
+
+export interface IncidentChatAnswer {
+  answer: string;
+  evidenceIds: string[];
+  followUps: string[];
+  sources: string[];
+  usedLiveData: boolean;
+  investigation?: InvestigationResult;
+}
+
+export interface InvestigationFact {
+  id: string;
+  summary: string;
+  source: string;
+  confidence: "high" | "medium" | "low";
+}
+
+export interface InvestigationHypothesis {
+  id: string;
+  summary: string;
+  status: "supported" | "possible" | "rejected";
+  confidence: "high" | "medium" | "low";
+}
+
+export interface InvestigationStep {
+  id: string;
+  title: string;
+  outcome: string;
+  usedLiveData: boolean;
+}
+
+export interface InvestigationResult {
+  playbook: string;
+  summary: string;
+  facts: InvestigationFact[];
+  hypotheses: InvestigationHypothesis[];
+  unknowns: string[];
+  nextChecks: string[];
+  sources: string[];
+  evidenceIds: string[];
+  usedLiveData: boolean;
+  steps: InvestigationStep[];
+  objectChecks?: Array<{
+    objectName: string;
+    status: "exists" | "missing" | "inaccessible" | "unknown";
+    detail: string;
+  }>;
+  lineage?: {
+    failingModels: string[];
+    upstreamSources: string[];
+    modelPaths: string[];
+    modelSchemas: string[];
+  };
+  priorIncidents?: Array<{
+    incidentRunId: string;
+    startedAt: string;
+    severity?: string;
+    rootCause?: string;
+  }>;
+  externalContext?: {
+    slackMentions: Array<{
+      channel: string;
+      ts: string;
+      text: string;
+    }>;
+    jiraIssues: Array<{
+      key: string;
+      summary: string;
+      status?: string;
+    }>;
+    confluencePages: Array<{
+      id: string;
+      title: string;
+    }>;
+  };
+  subAgents?: Array<{
+    name: string;
+    focus: string;
+    summary: string;
+    usedLiveData: boolean;
+  }>;
+  workspace?: {
+    incidentRunId: string;
+    factCount: number;
+    hypothesisCount: number;
+    messageCount: number;
+    openQuestions: string[];
+    lastUpdated: string;
+  };
+}
+
+export interface IncidentWorkspace {
+  incidentRunId: string;
+  facts: InvestigationFact[];
+  hypotheses: InvestigationHypothesis[];
+  openQuestions: string[];
+  subAgents: Array<{
+    name: string;
+    focus: string;
+    summary: string;
+    usedLiveData: boolean;
+    ranAt: string;
+  }>;
+  conversationCount: number;
+  lastUpdated: string;
+}
+
+export interface IncidentContext {
+  incidentId: string;
+  workflow: WorkflowName;
+  triggerSource: "airflow_webhook" | "airflow_poll" | "schedule" | "slack_message" | "manual";
+  triggerEvent: Record<string, unknown>;
+  startedAt: string;
+  severity: "P1" | "P2" | "P3";
+  status: "failure" | "warning" | "healthy";
+  dag: {
+    dagId?: string;
+    runId?: string;
+    executionDate?: string;
+    failedTasks: Array<{ taskId: string; tryNumber?: number; durationSeconds?: number | null }>;
+    retryCount?: number;
+  };
+  evidence: IncidentEvidence[];
+  impactedAssets: AssetRef[];
+  recentChanges: Array<{ type: string; name: string; description: string; filePath?: string }>;
+  candidateCauses: CauseAssessment[];
+  recommendedActions: RecommendedAction[];
+  impact: ImpactSummary;
+  entityGraph?: EntityGraph;
+  story?: StoryOutput;
+  securityMode: {
+    trustTier: TrustTier;
+    actionMode: "read-only" | "approval-required" | "autonomous";
+  };
+}
+
+export interface AssistantReadinessReport {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+  llm: {
+    configured: boolean;
+    provider?: string | null;
+    model?: string | null;
+  };
+  workflows: Partial<Record<WorkflowName, { ready: boolean; issues: string[] }>>;
+}
+
 export interface AirflowFailureEvent {
   dag_id: string;
   run_id: string;
@@ -138,9 +396,11 @@ export const DuckpipeConfigSchema = z.object({
       .object({
         enabled: z.boolean(),
         cloud_url: z.string().default("https://cloud.getdbt.com"),
-        api_token: z.string(),
-        account_id: z.string(),
-        project_id: z.string(),
+        api_token: z.string().optional(),
+        account_id: z.string().optional(),
+        project_id: z.string().optional(),
+        // Path to a local manifest.json — preferred over dbt Cloud for local projects
+        local_manifest_path: z.string().optional(),
       })
       .optional(),
     snowflake: z
@@ -186,6 +446,22 @@ export const DuckpipeConfigSchema = z.object({
       })
       .optional(),
   }),
+  llm: z
+    .object({
+      provider: z
+        .enum(["auto", "anthropic", "openai", "gemini"])
+        .default("auto"),
+      model: z.string().optional(),          // override the default model for the provider
+      agents: z                              // per-agent model overrides
+        .object({
+          airflow:   z.string().optional(),  // e.g. use a cheaper model for monitoring
+          snowflake: z.string().optional(),
+          dbt:       z.string().optional(),
+          comms:     z.string().optional(),  // comms benefits from a stronger model
+        })
+        .optional(),
+    })
+    .optional(),
   workflows: z
     .object({
       incident_autopilot: z

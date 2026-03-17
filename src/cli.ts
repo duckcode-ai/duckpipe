@@ -9,6 +9,7 @@ import { queryAudit } from "./audit.js";
 import { verifyAll, verifySingle } from "./verify.js";
 import { startDuckpipe } from "./index.js";
 import { startDashboardServer } from "./server.js";
+import { printDoctorReport } from "./doctor.js";
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -29,6 +30,9 @@ async function main(): Promise<void> {
       break;
     case "audit":
       await cmdAudit();
+      break;
+    case "doctor":
+      await cmdDoctor();
       break;
     case "help":
     case "--help":
@@ -169,6 +173,11 @@ async function cmdAudit(): Promise<void> {
   closeAll();
 }
 
+async function cmdDoctor(): Promise<void> {
+  const config = loadConfig();
+  printDoctorReport(config);
+}
+
 function getFlag(flag: string): string | undefined {
   const idx = args.indexOf(flag);
   if (idx === -1) return undefined;
@@ -195,6 +204,7 @@ Commands:
   verify [integration]   Check connections and permissions
   setup                  Initialize project (directories, config, .env)
   audit [--limit N]      Show recent audit log entries
+  doctor                 Run readiness checks for workflows and story generation
   help                   Show this help message
 
 Examples:
@@ -206,6 +216,7 @@ Examples:
   npx duckpipe dashboard
   npx duckpipe dashboard --port 3000
   npx duckpipe audit --limit 20
+  npx duckpipe doctor
 
 Documentation: https://docs.duckpipe.dev
 `);

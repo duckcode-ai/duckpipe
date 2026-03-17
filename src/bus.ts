@@ -17,9 +17,11 @@ export class FileTransport implements Transport {
   private busDir: string;
   private watchers: FSWatcher[] = [];
   private pollIntervals: NodeJS.Timeout[] = [];
+  private readonly useWatchers: boolean;
 
   constructor(busDir = "./bus") {
     this.busDir = busDir;
+    this.useWatchers = process.env.DUCKPIPE_BUS_MODE === "watch";
     this.ensureDirectories();
   }
 
@@ -60,11 +62,13 @@ export class FileTransport implements Transport {
     // Watch all agent out/ directories + orchestrator/ directory
     for (const agent of AGENTS) {
       const outDir = join(this.busDir, "agents", agent, "out");
-      this.watchDirectory(outDir, handler);
+      if (this.useWatchers) this.watchDirectory(outDir, handler);
+      else this.pollDirectory(outDir, handler);
     }
 
     const orchDir = join(this.busDir, "orchestrator");
-    this.watchDirectory(orchDir, handler);
+    if (this.useWatchers) this.watchDirectory(orchDir, handler);
+    else this.pollDirectory(orchDir, handler);
   }
 
   private watchAgentOutbox(
@@ -87,6 +91,10 @@ export class FileTransport implements Transport {
     watcher.on("add", (filePath) => {
       if (!filePath.endsWith(".json")) return;
       this.processFile(filePath, handler);
+    });
+
+    watcher.on("error", () => {
+      this.pollDirectory(dir, handler);
     });
 
     this.watchers.push(watcher);

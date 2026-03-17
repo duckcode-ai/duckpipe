@@ -93,11 +93,22 @@ async function startAllAsProcesses(config: DuckpipeConfig): Promise<void> {
   for (const agent of AGENTS) {
     if (isAgentRunning(agent)) continue;
 
-    const entryPoint = resolve(`./dist/agents/${agent}/index.js`);
-    const busDir = resolve("./bus");
+    const projectRoot = resolve(".");
+    const busDir      = resolve("./bus");
+
+    // In dev (tsx / ts entrypoint): run TS source directly even if dist/ exists,
+    // so agents stay in sync with the current workspace edits.
+    const distEntry = resolve(`./dist/agents/${agent}/index.js`);
+    const srcEntry  = resolve(`./agents/${agent}/index.ts`);
+    const { existsSync } = await import("node:fs");
+    const runningFromTsEntry = process.argv[1]?.endsWith(".ts") || process.execArgv.some((arg) => arg.includes("tsx"));
+    const useCompiled = existsSync(distEntry) && !runningFromTsEntry;
+    const cmd  = "node";
+    const args = useCompiled ? [distEntry] : ["--import", "tsx", srcEntry];
 
     try {
-      const child = spawn("node", [entryPoint], {
+      const child = spawn(cmd, args, {
+        cwd: projectRoot,
         env: { ...process.env, DUCKPIPE_BUS_DIR: busDir },
         stdio: ["ignore", "pipe", "pipe"],
         detached: false,

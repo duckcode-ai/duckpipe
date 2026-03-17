@@ -20,24 +20,55 @@ agents:
   cpu_limit: 0.5
   timeout_seconds: 120
 
+# ── LLM provider & model selection ──────────────────────────────────────────
+# provider: auto       → uses the first API key found in .env (recommended)
+# provider: anthropic  → force Anthropic
+# provider: openai     → force OpenAI
+# provider: gemini     → force Google Gemini
+#
+# model: leave blank to use the provider's fast default.
+# You can set ANY model name — DuckPipe passes it directly to the API, so
+# you can use a newly released model on day 0 without updating DuckPipe.
+#
+# agents: optional per-agent overrides. Use a cheaper model for monitoring
+# tasks and a stronger model for writing (Jira tickets, Confluence docs).
+#
+# Provider defaults (fast & cheap):
+#   anthropic  →  claude-3-5-haiku-20241022
+#   openai     →  gpt-4o-mini
+#   gemini     →  gemini-2.0-flash
+#
+# Powerful alternatives:
+#   anthropic  →  claude-3-7-sonnet-20250219  |  claude-opus-4-5
+#   openai     →  gpt-4.1  |  o3
+#   gemini     →  gemini-2.5-pro-exp-03-25
+llm:
+  provider: "auto"
+  model: ""           # blank = provider default
+  agents:
+    airflow:   ""     # blank = inherit global model
+    snowflake: ""
+    dbt:       ""
+    comms:     ""     # consider a stronger model for ticket/doc writing
+
 integrations:
   airflow:
-    enabled: true
+    enabled: false     # set to true after adding credentials to .env
     base_url: "${AIRFLOW_BASE_URL}"
     username: "${AIRFLOW_USERNAME}"
     password: "${AIRFLOW_PASSWORD}"
-    allowed_dags: []  # empty = all DAGs visible
+    allowed_dags: []   # empty = all DAGs visible
     verify_ssl: true
 
   dbt:
-    enabled: true
+    enabled: false     # set to true after adding credentials to .env
     cloud_url: "https://cloud.getdbt.com"
     api_token: "${DBT_API_TOKEN}"
     account_id: "${DBT_ACCOUNT_ID}"
     project_id: "${DBT_PROJECT_ID}"
 
   snowflake:
-    enabled: true
+    enabled: false     # set to true after adding credentials to .env
     account: "${SNOWFLAKE_ACCOUNT}"
     user: "${SNOWFLAKE_USER}"
     password: "${SNOWFLAKE_PASSWORD}"
@@ -48,7 +79,7 @@ integrations:
     watched_databases: []
 
   slack:
-    enabled: true
+    enabled: false     # set to true after adding credentials to .env
     bot_token: "${SLACK_BOT_TOKEN}"
     app_token: "${SLACK_APP_TOKEN}"
     trigger_keyword: "@duckpipe"
@@ -59,14 +90,14 @@ integrations:
     approval_timeout_seconds: 300
 
   jira:
-    enabled: true
+    enabled: false     # set to true after adding credentials to .env
     base_url: "${JIRA_BASE_URL}"
     email: "${JIRA_EMAIL}"
     api_token: "${JIRA_API_TOKEN}"
     default_project: "DE"
 
   confluence:
-    enabled: true
+    enabled: false     # set to true after adding credentials to .env
     base_url: "${CONFLUENCE_BASE_URL}"
     email: "${CONFLUENCE_EMAIL}"
     api_token: "${CONFLUENCE_API_TOKEN}"

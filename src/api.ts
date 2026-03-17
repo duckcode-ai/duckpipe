@@ -4,7 +4,11 @@ import { getStateDb, getAuditDb } from "./db.js";
 import { queryAudit, exportAuditJSON, exportAuditCSV } from "./audit.js";
 import { getRunningAgents, isAgentRunning } from "./docker.js";
 import { setCorsHeaders } from "./server.js";
+import { getActiveLlmProviderName, getActiveLlmInfo, KNOWN_MODELS } from "./llm.js";
 import type { DuckpipeConfig } from "./types.js";
+import { buildAssistantReadinessReport } from "./registry.js";
+import { getActiveOrchestrator } from "./runtime-context.js";
+import { askIncidentQuestion, getIncidentChatState } from "./incident-chat.js";
 
 let config: DuckpipeConfig | null = null;
 let startTime = Date.now();
@@ -21,10 +25,10 @@ export function emitDashboardEvent(type: string, data: Record<string, unknown>):
   apiEvents.emit("sse", { type, data, timestamp: new Date().toISOString() });
 }
 
-export function handleApiRequest(
+export async function handleApiRequest(
   req: IncomingMessage,
   res: ServerResponse
-): boolean {
+): Promise<boolean> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
   const path = url.pathname;
 
@@ -43,6 +47,25 @@ export function handleApiRequest(
       return sendJson(res, getWorkflowRuns(name, url));
     }
     if (path === "/api/incidents") return sendJson(res, getIncidents(url));
+    if (path.match(/^\/api\/incidents\/[^/]+\/chat$/)) {
+      const incidentId = path.split("/")[3];
+      if (req.method === "GET") {
+        return sendJson(res, getIncidentChatState(incidentId));
+      }
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        if (!config) {
+          throw new Error("Config not loaded");
+        }
+        const question = typeof body.question === "string" ? body.question : "";
+        const result = await askIncidentQuestion(incidentId, question, config, getActiveOrchestrator());
+        emitDashboardEvent("incident-chat", { incidentRunId: incidentId, message: result.message });
+        return sendJson(res, result);
+      }
+      res.writeHead(405);
+      res.end(JSON.stringify({ error: "Method not allowed" }));
+      return true;
+    }
     if (path === "/api/costs") return sendJson(res, getCosts(url));
     if (path === "/api/pipelines") return sendJson(res, getPipelines(url));
     if (path === "/api/audit") return sendJson(res, getAuditData(url));
@@ -51,6 +74,8 @@ export function handleApiRequest(
     if (path === "/api/approvals") return sendJson(res, getApprovals(url));
     if (path === "/api/agents") return sendJson(res, getAgentStatus());
     if (path === "/api/events") return handleSSE(req, res);
+    if (path === "/api/llm/models") return sendJson(res, KNOWN_MODELS);
+    if (path === "/api/story")     return sendJson(res, getLatestStory());
 
     res.writeHead(404);
     res.end(JSON.stringify({ error: "Not found" }));
@@ -59,6 +84,18 @@ export function handleApiRequest(
     res.end(JSON.stringify({ error: String(err) }));
   }
   return true;
+}
+
+async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  if (chunks.length === 0) return {};
+
+  const raw = Buffer.concat(chunks).toString("utf-8").trim();
+  if (!raw) return {};
+  return JSON.parse(raw) as Record<string, unknown>;
 }
 
 function sendJson(res: ServerResponse, data: unknown): boolean {
@@ -100,12 +137,21 @@ function getHealth() {
     )
     .all();
 
-  const integrations: Record<string, boolean> = {};
+  const integrations: Record<string, string> = {};
   if (config) {
     for (const [key, val] of Object.entries(config.integrations)) {
-      integrations[key] = !!(val as { enabled?: boolean } | undefined)?.enabled;
+      const entry = val as Record<string, unknown> | undefined;
+      if (!entry?.enabled) {
+        integrations[key] = "disabled";
+      } else if (hasRealCredentials(key, entry)) {
+        integrations[key] = "configured";
+      } else {
+        integrations[key] = "no_credentials";
+      }
     }
   }
+
+  const readiness = config ? buildAssistantReadinessReport(config) : null;
 
   return {
     uptime_ms: uptimeMs,
@@ -117,6 +163,10 @@ function getHealth() {
     total_audit_actions: totalActions.count,
     integrations,
     recent_runs: recentRuns,
+    llm_provider: getActiveLlmProviderName(config ?? undefined),
+    llm_model: getActiveLlmInfo(config ?? undefined)?.model ?? null,
+    agents_runtime: config?.agents?.runtime ?? "process",
+    assistant_readiness: readiness,
   };
 }
 
@@ -367,6 +417,110 @@ function handleAuditExport(url: URL, res: ServerResponse): boolean {
   return true;
 }
 
+type StoryResultPayload = Record<string, unknown>;
+
+export function hasVisibleStoryContent(result: StoryResultPayload, workflow: string): boolean {
+  const story = typeof result.story === "string" ? result.story : "";
+  const storyOutput = (result.storyOutput ?? null) as Record<string, unknown> | null;
+  const incidentContext = (result.incidentContext ?? null) as Record<string, unknown> | null;
+  const severity = typeof result.severity === "string" ? result.severity : null;
+  const rootCauseCategory = typeof result.rootCauseCategory === "string" ? result.rootCauseCategory : null;
+  const changedTables = Array.isArray(result.changedTables) ? result.changedTables : [];
+  const affectedModelCount = typeof result.affectedModelCount === "number" ? result.affectedModelCount : 0;
+  const dbtChangesFound = typeof result.dbtChangesFound === "number" ? result.dbtChangesFound : 0;
+  const anomaliesFound = typeof result.anomaliesFound === "number" ? result.anomaliesFound : 0;
+  const topEvidence = Array.isArray(storyOutput?.topEvidence) ? storyOutput.topEvidence : [];
+  const evidence = Array.isArray(incidentContext?.evidence) ? incidentContext.evidence : [];
+  const blastRadius = Array.isArray((incidentContext as { impact?: { blastRadius?: unknown[] } } | null)?.impact?.blastRadius)
+    ? (((incidentContext as { impact?: { blastRadius?: unknown[] } }).impact?.blastRadius) ?? [])
+    : [];
+  const affectedDags = Array.isArray((incidentContext as { impact?: { affectedDags?: unknown[] } } | null)?.impact?.affectedDags)
+    ? (((incidentContext as { impact?: { affectedDags?: unknown[] } }).impact?.affectedDags) ?? [])
+    : [];
+
+  if (workflow === "pipeline-whisperer") {
+    return story.trim().length >= 20;
+  }
+
+  return (
+    (rootCauseCategory !== null && rootCauseCategory !== "unknown") ||
+    changedTables.length > 0 ||
+    affectedModelCount > 0 ||
+    dbtChangesFound > 0 ||
+    anomaliesFound > 0 ||
+    severity !== null ||
+    topEvidence.length > 0 ||
+    evidence.length > 0 ||
+    blastRadius.length > 0 ||
+    affectedDags.length > 0
+  );
+}
+
+function getLatestStory() {
+  const stateDb = getStateDb();
+  // Pull the most recent incident-autopilot or pipeline-whisperer run that has a story
+  const row = stateDb.prepare(`
+    SELECT id, workflow, started_at, completed_at, status, result_json
+    FROM workflow_runs
+    WHERE workflow IN ('incident-autopilot', 'pipeline-whisperer')
+      AND result_json IS NOT NULL
+    ORDER BY started_at DESC
+    LIMIT 10
+  `).all() as Array<{ id: string; workflow: string; started_at: string; completed_at: string; status: string; result_json: string }>;
+
+  for (const r of row) {
+    try {
+      const result = JSON.parse(r.result_json) as Record<string, unknown>;
+      const story = result.story as string | undefined;
+      const storyOutput = result.storyOutput as Record<string, unknown> | undefined;
+      const incidentContext = result.incidentContext as Record<string, unknown> | undefined;
+
+      // Skip empty / connection-error stories
+      if (!story || story.length < 20) continue;
+      if (result.status === "skipped" || result.status === "unreachable") continue;
+      if (result.reason === "airflow_unreachable") continue;
+
+      const rootCauseCategory = result.rootCauseCategory as string | undefined;
+      const changedTables = result.changedTables as string[] | undefined;
+      const affectedModelCount = result.affectedModelCount as number | undefined;
+      const dbtChangesFound = result.dbtChangesFound as number | undefined;
+      const anomaliesFound = result.anomaliesFound as number | undefined;
+
+      if (!hasVisibleStoryContent(result, r.workflow)) continue;
+
+      return {
+        id: r.id,
+        workflow: r.workflow,
+        started_at: r.started_at,
+        status: r.status,
+        story,
+        story_output: storyOutput ?? null,
+        incident_context: incidentContext ?? null,
+        severity: result.severity ?? null,
+        rootCause: result.rootCause ?? null,
+        rootCauseCategory,
+        dbtChangesFound: dbtChangesFound ?? 0,
+        anomaliesFound: anomaliesFound ?? 0,
+        changedTables: changedTables ?? [],
+        affectedModelCount: affectedModelCount ?? 0,
+        blastRadius: Array.isArray((incidentContext as { impact?: { blastRadius?: unknown[] } } | undefined)?.impact?.blastRadius)
+          ? ((incidentContext as { impact?: { blastRadius?: unknown[] } }).impact?.blastRadius ?? [])
+          : [],
+        likelyOwner: (incidentContext as { impact?: { likelyOwner?: string } } | undefined)?.impact?.likelyOwner ?? null,
+        runbook: (incidentContext as { impact?: { runbook?: string } } | undefined)?.impact?.runbook ?? null,
+        entityGraph: (incidentContext as { entityGraph?: unknown } | undefined)?.entityGraph ?? null,
+        topEvidence: Array.isArray((storyOutput as { topEvidence?: unknown[] } | undefined)?.topEvidence)
+          ? ((storyOutput as { topEvidence?: string[] }).topEvidence ?? [])
+          : [],
+        unknowns: Array.isArray((storyOutput as { unknowns?: unknown[] } | undefined)?.unknowns)
+          ? ((storyOutput as { unknowns?: string[] }).unknowns ?? [])
+          : [],
+      };
+    } catch {}
+  }
+  return null;
+}
+
 function getConfigSafe() {
   if (!config) return { error: "Config not loaded" };
 
@@ -390,10 +544,12 @@ function getReadiness() {
     const stateDb = getStateDb();
     stateDb.prepare("SELECT 1").get();
     const agents = getRunningAgents();
+    const readiness = config ? buildAssistantReadinessReport(config) : null;
     return {
-      status: agents.length > 0 ? "ready" : "degraded",
+      status: agents.length > 0 && readiness?.ok !== false ? "ready" : "degraded",
       agents_running: agents,
       db: "ok",
+      assistant: readiness,
     };
   } catch {
     return { status: "not_ready", agents_running: [], db: "error" };
@@ -455,6 +611,55 @@ function handleSSE(req: IncomingMessage, res: ServerResponse): boolean {
   });
 
   return true;
+}
+
+function hasRealCredentials(integration: string, entry: Record<string, unknown>): boolean {
+  const requiredFields: Record<string, string[]> = {
+    airflow: ["base_url", "username", "password"],
+    dbt: ["api_token", "account_id", "project_id"],
+    slack: ["bot_token"],
+    jira: ["base_url", "email", "api_token"],
+    confluence: ["base_url", "email", "api_token"],
+  };
+
+  if (integration === "snowflake") {
+    const hasAccount = hasRealValue(entry["account"]);
+    const hasUser = hasRealValue(entry["user"]);
+    if (!hasAccount || !hasUser) return false;
+    const hasPassword = hasRealValue(entry["password"]);
+    const hasKeyPath = hasRealValue(entry["private_key_path"]);
+    const hasKeyEnv = hasRealValue(process.env["SNOWFLAKE_PRIVATE_KEY_PATH"]);
+    return hasPassword || hasKeyPath || hasKeyEnv;
+  }
+
+  const fields = requiredFields[integration];
+  if (!fields) return true;
+
+  return fields.every((field) => hasRealValue(entry[field]));
+}
+
+function hasRealValue(raw: unknown): boolean {
+  if (typeof raw !== "string" || raw.length === 0) return false;
+  const resolved = resolveEnvVar(raw);
+  return resolved.length > 0 && !isPlaceholder(resolved);
+}
+
+function resolveEnvVar(value: string): string {
+  const match = value.match(/^\$\{(.+)\}$/);
+  if (match) {
+    return process.env[match[1]] ?? "";
+  }
+  return value;
+}
+
+function isPlaceholder(value: string): boolean {
+  if (value.length === 0) return true;
+  if (value.startsWith("https://your-") || value.startsWith("http://your-")) return true;
+  if (value.includes("example.com")) return true;
+  if (value.startsWith("xoxb-your-") || value.startsWith("xapp-your-")) return true;
+  if (value.startsWith("ghp_your-") || value.startsWith("sk-ant-your-")) return true;
+  if (value === "myorg.us-east-1" || value === "DUCKPIPE_SVC") return true;
+  return false;
 }
 
 function formatUptime(ms: number): string {

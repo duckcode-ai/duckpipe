@@ -92,29 +92,30 @@ describe("pipeline-whisperer workflow", () => {
     const result = await runPipelineWhisperer(orchestrator, makeConfig());
 
     expect(result.status).toBe("completed");
-    expect(result.agentResults.snowflake).toMatchObject({ drift: false });
+    expect(result.agentResults.snowflake).toMatchObject({ firstRun: true, tablesSnapshotted: 0 });
   });
 
   it("detects drift and dispatches to dbt agent", async () => {
+    let snowflakeCalls = 0;
     transport.registerAgentHandler("snowflake", (msg: BusMessage) =>
       MockTransport.createResponse(msg, {
-        driftDetected: true,
-        changedTables: ["raw.stripe.payments"],
-        schemas: [{ table: "raw.stripe.payments", columns: [{ name: "id", type: "NUMBER" }] }],
+        schemas: snowflakeCalls++ === 0
+          ? [{ database: "ANALYTICS", schema: "RAW", table: "PAYMENTS", columns: [{ name: "ID", type: "NUMBER", nullable: false }] }]
+          : [{ database: "ANALYTICS", schema: "RAW", table: "PAYMENTS", columns: [{ name: "ID", type: "NUMBER", nullable: false }, { name: "STRIPE_FEE", type: "NUMBER", nullable: true }] }],
       })
     );
 
     transport.registerAgentHandler("dbt", (msg: BusMessage) =>
       MockTransport.createResponse(msg, {
-        affectedModels: ["stg_payments"],
-        proposedChanges: [{ model: "stg_payments", diff: "+  id NUMBER" }],
-        prUrl: "https://github.com/test/test/pull/1",
+        models: [{ name: "stg_payments" }],
+        affectedWithReasons: [{ model: { name: "stg_payments" }, reason: "depends on changed source" }],
       })
     );
 
     orchestrator = new Orchestrator(transport, makeConfig(2));
     orchestrator.start();
 
+    await runPipelineWhisperer(orchestrator, makeConfig(2));
     const result = await runPipelineWhisperer(orchestrator, makeConfig(2));
 
     expect(result.status).toBe("completed");

@@ -55,6 +55,7 @@ interface AirflowDiagnosis {
   writeActionsNeeded: string[];
   retryCount?: number;
   affectedTables?: string[];
+  failedTasks?: Array<{ taskId: string; tryNumber: number; durationSeconds: number | null }>;
   slaBreachImminent?: boolean;
 }
 
@@ -76,6 +77,9 @@ function isAllowed(config: AirflowConfig, dagId: string): boolean {
 }
 
 export async function listDags(config: AirflowConfig): Promise<DagSummary[]> {
+  if (!config?.baseUrl) {
+    throw new Error("Airflow base_url is not configured");
+  }
   const resp = await fetch(`${config.baseUrl}/api/v1/dags?limit=100`, {
     headers: authHeaders(config),
   });
@@ -262,12 +266,46 @@ export async function clearTask(
 
 export async function checkFailures(
   config: AirflowConfig
-): Promise<AirflowDiagnosis> {
-  const dags = await listDags(config);
+): Promise<AirflowDiagnosis & { unreachable?: boolean }> {
+  if (!config?.baseUrl) {
+    return {
+      status: "healthy",
+      unreachable: true,
+      affectedDags: [],
+      rootCause: "Airflow unreachable: base_url is not configured",
+      rootCauseCategory: "connection_error",
+      evidence: [],
+      recommendedAction: "Set integrations.airflow.base_url in duckpipe.yaml or .env",
+      confidence: "high",
+      writeActionsNeeded: [],
+    };
+  }
+  let dags;
+  try {
+    dags = await listDags(config);
+  } catch (err) {
+    // Airflow is down or credentials are wrong — this is not a pipeline incident.
+    // Return a structured "unreachable" response so the orchestrator can skip cleanly.
+    return {
+      status: "healthy",
+      unreachable: true,
+      affectedDags: [],
+      rootCause: `Airflow unreachable: ${err instanceof Error ? err.message : String(err)}`,
+      rootCauseCategory: "connection_error",
+      evidence: [],
+      recommendedAction: "Check that Airflow is running and credentials in .env are correct",
+      confidence: "high",
+      writeActionsNeeded: [],
+    };
+  }
   const failedDags: string[] = [];
   const evidence: string[] = [];
+  const affectedTables = new Set<string>();
+  const failedTaskSummaries: Array<{ taskId: string; tryNumber: number; durationSeconds: number | null }> = [];
   let rootCause = "";
   let rootCauseCategory: AirflowDiagnosis["rootCauseCategory"] = "unknown";
+  let retryCount = 0;
+  let slaBreachImminent = false;
 
   for (const dag of dags) {
     const runs = await getDagRuns(config, dag.dagId, 1);
@@ -286,6 +324,9 @@ export async function checkFailures(
     const failedTasks = tasks.filter((t) => t.state === "failed");
 
     for (const task of failedTasks.slice(0, 3)) {
+      retryCount = Math.max(retryCount, Math.max(0, task.tryNumber - 1));
+      if ((task.duration ?? 0) > 3600) slaBreachImminent = true;
+      failedTaskSummaries.push({ taskId: task.taskId, tryNumber: task.tryNumber, durationSeconds: task.duration });
       try {
         const logs = await getTaskLogs(
           config,
@@ -296,6 +337,9 @@ export async function checkFailures(
         );
         const snippet = logs.slice(-200);
         evidence.push(snippet);
+        for (const table of extractTableRefs(logs)) {
+          affectedTables.add(table);
+        }
 
         const { cause, category } = classifyFromLogs(logs);
         rootCause = cause;
@@ -327,6 +371,10 @@ export async function checkFailures(
     evidence: evidence.slice(0, 3),
     recommendedAction: getRecommendation(rootCauseCategory),
     confidence: rootCause ? "high" : "low",
+    retryCount,
+    affectedTables: [...affectedTables],
+    failedTasks: failedTaskSummaries,
+    slaBreachImminent,
     writeActionsNeeded:
       rootCauseCategory === "timeout" || rootCauseCategory === "connection_error"
         ? ["trigger_dag_run"]
@@ -334,7 +382,58 @@ export async function checkFailures(
   };
 }
 
-function classifyFromLogs(
+export async function getRunningDags(
+  config: AirflowConfig,
+  monitoredDags: string[] = []
+): Promise<Array<{
+  dagId: string;
+  elapsedSeconds: number;
+  historicalP95Seconds: number;
+  slaDeadline: string;
+}>> {
+  const dags = await listDags(config);
+  const selected = monitoredDags.length > 0
+    ? dags.filter((dag) => monitoredDags.includes(dag.dagId))
+    : dags;
+
+  const runningDags: Array<{
+    dagId: string;
+    elapsedSeconds: number;
+    historicalP95Seconds: number;
+    slaDeadline: string;
+  }> = [];
+
+  for (const dag of selected.slice(0, 50)) {
+    try {
+      const runs = await getDagRuns(config, dag.dagId, 5);
+      const activeRun = runs.find((run) => run.state === "running" || run.state === "queued");
+      if (!activeRun) continue;
+
+      const startedAt = activeRun.startDate ? new Date(activeRun.startDate).getTime() : new Date(activeRun.executionDate).getTime();
+      const elapsedSeconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+      const historicalP95Seconds = 3600;
+      const slaDeadline = new Date(startedAt + historicalP95Seconds * 1000).toISOString();
+
+      runningDags.push({
+        dagId: dag.dagId,
+        elapsedSeconds,
+        historicalP95Seconds,
+        slaDeadline,
+      });
+    } catch {
+      // Ignore per-DAG lookup failures so the rest of the check can continue.
+    }
+  }
+
+  return runningDags;
+}
+
+function extractTableRefs(logs: string): string[] {
+  const matches = logs.match(/\b(?:[A-Za-z_][A-Za-z0-9_]*\.){1,2}[A-Za-z_][A-Za-z0-9_]*\b/g) ?? [];
+  return [...new Set(matches)].slice(0, 10);
+}
+
+export function classifyFromLogs(
   logs: string
 ): { cause: string; category: AirflowDiagnosis["rootCauseCategory"] } {
   const lower = logs.toLowerCase();
@@ -364,6 +463,18 @@ function classifyFromLogs(
     return {
       cause: "Logic error in task code",
       category: "logic_error",
+    };
+  }
+  if (
+    lower.includes("sql compilation error") ||
+    lower.includes("object does not exist") ||
+    lower.includes("does not exist, or operation cannot be performed") ||
+    lower.includes("not authorized") ||
+    lower.includes("insufficient privileges")
+  ) {
+    return {
+      cause: "Referenced Snowflake object is missing or inaccessible",
+      category: "upstream_dependency",
     };
   }
   if (

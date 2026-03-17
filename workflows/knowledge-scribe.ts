@@ -13,7 +13,7 @@ export async function runKnowledgeScribe(
     const manifestResult = await orchestrator.dispatchToAgent(
       "dbt",
       "knowledge-scribe",
-      "get_manifest",
+      "get_project_graph",
       {}
     );
 
@@ -21,8 +21,8 @@ export async function runKnowledgeScribe(
       name: string;
       description: string;
       columns: Array<{ name: string; description: string; type: string }>;
-      tests: string[];
-      depends_on: string[];
+      dependsOn?: string[];
+      tests?: string[];
     }>;
 
     // Step 2: For each model, create or update Confluence page
@@ -33,12 +33,17 @@ export async function runKnowledgeScribe(
           "knowledge-scribe",
           "confluence_upsert_page",
           {
-            model: model.name,
-            description: model.description,
-            columns: model.columns,
-            tests: model.tests,
-            lineage: model.depends_on,
-            spaceKey: config.integrations.confluence.space_key,
+            title: `DuckPipe Catalog — ${model.name}`,
+            body: [
+              `<h1>${model.name}</h1>`,
+              `<p>${model.description ?? "No description provided."}</p>`,
+              `<h2>Columns</h2>`,
+              `<ul>${(model.columns ?? []).map((column) => `<li><strong>${column.name}</strong> — ${column.type} — ${column.description ?? ""}</li>`).join("")}</ul>`,
+              `<h2>Lineage</h2>`,
+              `<p>${(model.dependsOn ?? []).join(", ") || "No lineage available."}</p>`,
+              `<h2>Tests</h2>`,
+              `<p>${(model.tests ?? []).join(", ") || "No tests recorded."}</p>`,
+            ].join(""),
           },
           {}
         );

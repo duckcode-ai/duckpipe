@@ -23,6 +23,12 @@ interface ConfluenceConfig {
   spaceKey: string;
 }
 
+interface ConfluencePageResult {
+  id: string;
+  title: string;
+  version?: { number: number };
+}
+
 interface SlackPostResult {
   ok: boolean;
   ts: string;
@@ -193,6 +199,26 @@ export function formatSlaWarning(params: {
   );
 }
 
+export function extractEntityFromMessage(text: string): { entity: string | null; kind: "model" | "table" | "unknown" } {
+  const normalized = text.trim();
+  const fenced = normalized.match(/`([^`]+)`/);
+  if (fenced?.[1]) {
+    return { entity: fenced[1], kind: classifyEntityKind(fenced[1]) };
+  }
+
+  const token = normalized.match(/(?:why|explain|optimize|fix)\s+([a-zA-Z0-9_.]+)/i)
+    ?? normalized.match(/([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9_]+){0,2})/);
+
+  const entity = token?.[1] ?? null;
+  return { entity, kind: entity ? classifyEntityKind(entity) : "unknown" };
+}
+
+function classifyEntityKind(entity: string): "model" | "table" | "unknown" {
+  if (entity.split(".").length >= 2) return "table";
+  if (/^(stg_|fct_|dim_|int_)/i.test(entity)) return "model";
+  return "unknown";
+}
+
 // ── Jira ──────────────────────────────────────────────
 
 export async function jiraCreateIssue(
@@ -255,6 +281,35 @@ export async function jiraGetIssue(
 
   if (!resp.ok) throw new Error(`Jira API error: ${resp.status}`);
   return (await resp.json()) as Record<string, unknown>;
+}
+
+export async function jiraSearchIssues(
+  config: JiraConfig,
+  jql: string,
+  limit = 10
+): Promise<Array<Record<string, unknown>>> {
+  const resp = await fetch(
+    `${config.baseUrl}/rest/api/3/search`,
+    {
+      method: "POST",
+      headers: {
+        Authorization:
+          "Basic " +
+          Buffer.from(`${config.email}:${config.apiToken}`).toString("base64"),
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        jql,
+        maxResults: Math.max(1, Math.min(limit, 20)),
+        fields: ["summary", "status", "issuetype", "updated"],
+      }),
+    }
+  );
+
+  if (!resp.ok) throw new Error(`Jira API error: ${resp.status}`);
+  const data = (await resp.json()) as { issues?: Array<Record<string, unknown>> };
+  return data.issues ?? [];
 }
 
 // ── Confluence ────────────────────────────────────────
@@ -334,4 +389,72 @@ export async function confluenceUpdatePage(
   }
 
   return (await resp.json()) as { id: string; title: string };
+}
+
+export async function confluenceFindPageByTitle(
+  config: ConfluenceConfig,
+  title: string
+): Promise<ConfluencePageResult | null> {
+  const resp = await fetch(
+    `${config.baseUrl}/rest/api/content?title=${encodeURIComponent(title)}&spaceKey=${encodeURIComponent(config.spaceKey)}&expand=version`,
+    {
+      headers: {
+        Authorization:
+          "Basic " +
+          Buffer.from(`${config.email}:${config.apiToken}`).toString("base64"),
+        Accept: "application/json",
+      },
+    }
+  );
+
+  if (!resp.ok) throw new Error(`Confluence API error: ${resp.status}`);
+  const data = (await resp.json()) as { results?: ConfluencePageResult[] };
+  return data.results?.[0] ?? null;
+}
+
+export async function confluenceSearchPages(
+  config: ConfluenceConfig,
+  query: string,
+  limit = 5
+): Promise<ConfluencePageResult[]> {
+  const cql = `space = "${config.spaceKey}" AND type = page AND title ~ "${query.replace(/"/g, '\\"')}"`;
+  const resp = await fetch(
+    `${config.baseUrl}/rest/api/search?cql=${encodeURIComponent(cql)}&limit=${Math.max(1, Math.min(limit, 10))}`,
+    {
+      headers: {
+        Authorization:
+          "Basic " +
+          Buffer.from(`${config.email}:${config.apiToken}`).toString("base64"),
+        Accept: "application/json",
+      },
+    }
+  );
+
+  if (!resp.ok) throw new Error(`Confluence API error: ${resp.status}`);
+  const data = (await resp.json()) as {
+    results?: Array<{ content?: ConfluencePageResult }>;
+  };
+  return (data.results ?? []).map((item) => item.content).filter(Boolean) as ConfluencePageResult[];
+}
+
+export async function confluenceUpsertPage(
+  config: ConfluenceConfig,
+  title: string,
+  body: string,
+  parentId?: string
+): Promise<{ id: string; title: string; action: "created" | "updated" }> {
+  const existing = await confluenceFindPageByTitle(config, title);
+  if (!existing) {
+    const created = await confluenceCreatePage(config, title, body, parentId);
+    return { ...created, action: "created" };
+  }
+
+  const updated = await confluenceUpdatePage(
+    config,
+    existing.id,
+    title,
+    body,
+    (existing.version?.number ?? 0) + 1
+  );
+  return { ...updated, action: "updated" };
 }

@@ -30,7 +30,7 @@ export function startDashboardServer(
   const bindHost = dashboardToken ? "0.0.0.0" : "127.0.0.1";
 
   return new Promise((resolve, reject) => {
-    const server = createServer((req, res) => {
+    const server = createServer(async (req, res) => {
       if (req.method === "OPTIONS") {
         setCorsHeaders(res);
         res.writeHead(204);
@@ -40,8 +40,13 @@ export function startDashboardServer(
 
       if (!authenticate(req, res)) return;
 
-      if (handleApiRequest(req, res)) return;
-      serveStatic(req, res);
+      try {
+        if (await handleApiRequest(req, res)) return;
+        serveStatic(req, res);
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+      }
     });
 
     server.listen(port, bindHost, () => {

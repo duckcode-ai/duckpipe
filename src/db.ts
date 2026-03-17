@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -63,6 +63,26 @@ CREATE TABLE IF NOT EXISTS confluence_pages (
   last_written_at TEXT NOT NULL,
   content_hash TEXT
 );
+
+CREATE TABLE IF NOT EXISTS incident_chat_messages (
+  id TEXT PRIMARY KEY,
+  incident_run_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  metadata_json TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now', 'utc')),
+  FOREIGN KEY (incident_run_id) REFERENCES workflow_runs(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_incident_chat_messages_run
+  ON incident_chat_messages(incident_run_id, created_at);
+
+CREATE TABLE IF NOT EXISTS incident_workspaces (
+  incident_run_id TEXT PRIMARY KEY,
+  workspace_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now', 'utc')),
+  FOREIGN KEY (incident_run_id) REFERENCES workflow_runs(id)
+);
 `;
 
 export function getStateDb(dataDir = "./data"): Database.Database {
@@ -84,12 +104,23 @@ export function getAuditDb(dataDir = "./data"): Database.Database {
   auditDb.pragma("busy_timeout = 5000");
   auditDb.pragma("synchronous = NORMAL");
 
-  const auditSchema = readFileSync(
-    join(__dirname, "..", "security", "audit-schema.sql"),
-    "utf-8"
-  );
+  const auditSchema = readFileSync(resolveAuditSchemaPath(), "utf-8");
   auditDb.exec(auditSchema);
   return auditDb;
+}
+
+function resolveAuditSchemaPath(): string {
+  const candidates = [
+    join(__dirname, "..", "security", "audit-schema.sql"),
+    join(__dirname, "..", "..", "security", "audit-schema.sql"),
+    join(process.cwd(), "security", "audit-schema.sql"),
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+
+  throw new Error(`Could not locate audit-schema.sql. Checked: ${candidates.join(", ")}`);
 }
 
 export function generateDedupKey(

@@ -10,6 +10,8 @@ import { Scheduler } from "./scheduler.js";
 import { ensureAgentsRunning, stopAllAgents } from "./docker.js";
 import { SlackListener } from "./slack-listener.js";
 import type { DuckpipeConfig, VaultBackend } from "./types.js";
+import { assertWorkflowToolContracts } from "./registry.js";
+import { setActiveOrchestrator } from "./runtime-context.js";
 
 export async function startDuckpipe(configPath = "./duckpipe.yaml"): Promise<{
   orchestrator: Orchestrator;
@@ -19,6 +21,7 @@ export async function startDuckpipe(configPath = "./duckpipe.yaml"): Promise<{
   shutdown: () => Promise<void>;
 }> {
   const config = loadConfig(configPath);
+  assertWorkflowToolContracts(config);
   const tier = config.duckpipe.trust_tier;
   const name = config.duckpipe.name;
 
@@ -36,6 +39,7 @@ export async function startDuckpipe(configPath = "./duckpipe.yaml"): Promise<{
   const transport = new FileTransport("./bus");
   const orchestrator = new Orchestrator(transport, config, vault);
   orchestrator.start();
+  setActiveOrchestrator(orchestrator);
 
   console.log(`[${timestamp()}] Starting agents...`);
   await ensureAgentsRunning(config);
@@ -74,6 +78,7 @@ export async function startDuckpipe(configPath = "./duckpipe.yaml"): Promise<{
     scheduler.stop();
     await stopAllAgents();
     await orchestrator.shutdown();
+    setActiveOrchestrator(null);
     console.log(`[${timestamp()}] Goodbye.`);
   };
 

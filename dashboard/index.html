@@ -22,6 +22,7 @@
   {
     "imports": {
       "react": "https://esm.sh/react@18.3.1",
+      "react-dom": "https://esm.sh/react-dom@18.3.1",
       "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
       "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
       "recharts": "https://esm.sh/recharts@2.12.7?external=react,react-dom",
@@ -82,6 +83,24 @@
       return res.json();
     }
 
+    async function apiPost(path, body) {
+      const res = await fetch('/api/' + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify(body || {}),
+      });
+      if (res.status === 401) {
+        localStorage.removeItem('duckpipe_token');
+        window.location.hash = '#/setup';
+        throw new Error('Unauthorized');
+      }
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || `API ${res.status}`);
+      }
+      return res.json();
+    }
+
     // SSE event bus — replaces polling for real-time updates
     const sseListeners = new Set();
     let sseConnected = false;
@@ -132,8 +151,28 @@
     }
 
     // ── Formatters ────────────────────────────────────────────────────────
-    function fmtTime(iso) { if (!iso) return '—'; try { return new Date(iso + 'Z').toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', second:'2-digit' }); } catch { return iso; } }
-    function fmtDate(iso) { if (!iso) return '—'; try { return new Date(iso).toLocaleDateString(undefined, { month:'short', day:'numeric' }); } catch { return iso; } }
+    function parseDateLike(value) {
+      if (!value) return null;
+      const raw = String(value).trim();
+      if (!raw) return null;
+      const normalized = /(?:Z|[+-]\d\d:\d\d)$/.test(raw)
+        ? raw
+        : raw.includes('T')
+          ? raw + 'Z'
+          : raw.replace(' ', 'T') + 'Z';
+      const parsed = new Date(normalized);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+    function fmtTime(iso) {
+      const parsed = parseDateLike(iso);
+      if (!parsed) return iso || '—';
+      return parsed.toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', second:'2-digit' });
+    }
+    function fmtDate(iso) {
+      const parsed = parseDateLike(iso);
+      if (!parsed) return iso || '—';
+      return parsed.toLocaleDateString(undefined, { month:'short', day:'numeric' });
+    }
     function fmtDuration(ms) { if (!ms && ms !== 0) return '—'; if (ms < 1000) return ms + 'ms'; const s = Math.floor(ms/1000); if (s < 60) return s + 's'; const m = Math.floor(s/60); return m + 'm ' + (s%60) + 's'; }
     function fmtNumber(n) { if (n == null) return '—'; return n.toLocaleString(); }
 
@@ -276,77 +315,639 @@
     }
 
     // ── Page: Overview ────────────────────────────────────────────────────
+    // ── Latest Root Cause Story card ─────────────────────────────────────
+    function LatestStoryCard() {
+      const { data: story, loading } = useApi('story');
+
+      if (loading) return null;
+
+      // No story yet — give a helpful "waiting" state
+      if (!story) {
+        return h('div', { className: 'rounded-xl border border-slate-700/40 bg-slate-800/40 px-5 py-4' },
+          h('div', { className: 'flex items-center gap-2 mb-2' },
+            h(GitBranch, { size: 15, className: 'text-slate-500' }),
+            h('span', { className: 'text-sm font-semibold text-slate-400' }, 'Root Cause Story'),
+            h('span', { className: 'ml-2 text-xs px-1.5 py-0.5 rounded bg-emerald-900/40 text-emerald-500 border border-emerald-700/30' }, '✓ All clear'),
+          ),
+          h('p', { className: 'text-xs text-slate-500' },
+            'No incidents or schema drift detected yet. This card will show a detailed root cause story the next time DuckPipe finds a real problem.',
+          ),
+          h('div', { className: 'flex gap-4 mt-2 text-[11px] text-slate-600' },
+            h('span', null, 'incident-autopilot: every 2 min'),
+            h('span', null, 'pipeline-whisperer: every 15 min'),
+          ),
+        );
+      }
+
+      // Show real incidents even when root-cause classification is still incomplete.
+      const storyText = String(story.story ?? '');
+      const hasRealContent = story.workflow === 'pipeline-whisperer'
+        ? storyText.trim().length >= 20
+        : Boolean(
+            (story.rootCauseCategory && story.rootCauseCategory !== 'unknown')
+            || (story.changedTables && story.changedTables.length > 0)
+            || (story.affectedModelCount && story.affectedModelCount > 0)
+            || story.dbtChangesFound > 0
+            || story.anomaliesFound > 0
+            || story.severity
+            || (Array.isArray(story.topEvidence) && story.topEvidence.length > 0)
+            || (Array.isArray(story.blastRadius) && story.blastRadius.length > 0)
+            || (Array.isArray(story.incident_context?.evidence) && story.incident_context.evidence.length > 0)
+            || (Array.isArray(story.incident_context?.impact?.affectedDags) && story.incident_context.impact.affectedDags.length > 0)
+          );
+
+      if (!hasRealContent) {
+        return h('div', { className: 'rounded-xl border border-slate-700/40 bg-slate-800/40 px-5 py-4' },
+          h('div', { className: 'flex items-center gap-2 mb-2' },
+            h(GitBranch, { size: 15, className: 'text-slate-500' }),
+            h('span', { className: 'text-sm font-semibold text-slate-400' }, 'Root Cause Story'),
+            h('span', { className: 'ml-2 text-xs px-1.5 py-0.5 rounded bg-emerald-900/40 text-emerald-500 border border-emerald-700/30' }, '✓ All clear'),
+          ),
+          h('p', { className: 'text-xs text-slate-500' },
+            'Workflows are running — no incidents or schema drift detected.',
+          ),
+          h('div', { className: 'flex gap-4 mt-2 text-[11px] text-slate-600' },
+            h('span', null, 'Last checked: ' + fmtTime(story.started_at)),
+          ),
+        );
+      }
+
+      const severityColors = {
+        P1: 'border-red-500/40 bg-red-950/20',
+        P2: 'border-amber-500/40 bg-amber-950/20',
+        P3: 'border-blue-500/40 bg-blue-950/20',
+      };
+      const sev = String(story.severity ?? '');
+      const isSchema = story.workflow === 'pipeline-whisperer';
+      const oncallSummary = String(story.story_output?.oncallSummary ?? story.story ?? '');
+      const managerSummary = String(story.story_output?.managerSummary ?? '');
+      const knowledgeSummary = String(story.story_output?.knowledgeSummary ?? story.story ?? '');
+      const storyUnknowns = Array.isArray(story.unknowns) ? story.unknowns : [];
+      const topEvidence = Array.isArray(story.topEvidence) ? story.topEvidence : [];
+      const blastRadius = Array.isArray(story.blastRadius) ? story.blastRadius : [];
+      const graphNodes = story.entityGraph?.nodes?.length || 0;
+      const graphEdges = story.entityGraph?.edges?.length || 0;
+
+      const storyDetails = h('div', { className: 'space-y-3' },
+        h('div', { className: 'flex items-start justify-between mb-3' },
+          h('div', { className: 'flex items-center gap-2' },
+            h(isSchema ? GitBranch : AlertTriangle, { size: 15, className: sev === 'P1' ? 'text-red-400' : sev === 'P2' ? 'text-amber-400' : 'text-indigo-400' }),
+            h('span', { className: 'text-sm font-semibold' },
+              isSchema ? 'Latest Schema Drift Story' : `Latest Incident Story — ${sev || 'P3'}`,
+            ),
+          ),
+          h('div', { className: 'flex items-center gap-3' },
+            sev && h('span', { className: `text-xs px-2 py-0.5 rounded-full font-medium ${sev === 'P1' ? 'bg-red-900/60 text-red-300' : sev === 'P2' ? 'bg-amber-900/60 text-amber-300' : 'bg-blue-900/60 text-blue-300'}` }, sev),
+            h('span', { className: 'text-xs text-slate-500' }, fmtTime(story.started_at)),
+          ),
+        ),
+
+        h('div', { className: 'grid gap-3 md:grid-cols-2' },
+          h('div', { className: 'bg-slate-900/45 rounded-lg px-4 py-3 border border-slate-700/30' },
+            h('div', { className: 'text-[11px] uppercase tracking-wide text-slate-500 mb-2' }, 'On-call Summary'),
+            h('pre', {
+              className: 'text-xs text-slate-300 font-mono whitespace-pre-wrap leading-relaxed max-h-64 overflow-y-auto',
+            }, oncallSummary),
+          ),
+          h('div', { className: 'bg-slate-900/45 rounded-lg px-4 py-3 border border-slate-700/30' },
+            h('div', { className: 'text-[11px] uppercase tracking-wide text-slate-500 mb-2' }, 'Manager Summary'),
+            h('p', { className: 'text-xs text-slate-300 leading-relaxed' }, managerSummary || 'No manager summary available.'),
+            h('div', { className: 'flex flex-wrap gap-2 mt-3 text-[11px]' },
+              story.likelyOwner && h('span', { className: 'px-2 py-1 rounded bg-slate-800 text-cyan-300 border border-slate-700/40' }, `Owner: ${story.likelyOwner}`),
+              story.runbook && h('span', { className: 'px-2 py-1 rounded bg-slate-800 text-emerald-300 border border-slate-700/40' }, `Runbook: ${story.runbook}`),
+              blastRadius.length > 0 && h('span', { className: 'px-2 py-1 rounded bg-slate-800 text-violet-300 border border-slate-700/40' }, `Blast radius: ${blastRadius.length}`),
+              graphNodes > 0 && h('span', { className: 'px-2 py-1 rounded bg-slate-800 text-amber-300 border border-slate-700/40' }, `Graph: ${graphNodes} nodes / ${graphEdges} edges`),
+            ),
+          ),
+        ),
+
+        knowledgeSummary && h('div', { className: 'bg-slate-900/35 rounded-lg px-4 py-3 border border-slate-700/20' },
+          h('div', { className: 'text-[11px] uppercase tracking-wide text-slate-500 mb-2' }, 'Deep Story'),
+          h('pre', {
+            className: 'text-xs text-slate-300 whitespace-pre-wrap leading-relaxed max-h-72 overflow-y-auto'
+          }, knowledgeSummary),
+        ),
+
+        storyUnknowns.length > 0 && h('div', { className: 'bg-slate-900/35 rounded-lg px-4 py-3 border border-slate-700/20' },
+          h('div', { className: 'text-[11px] uppercase tracking-wide text-slate-500 mb-2' }, 'Unknowns / Missing Context'),
+          h('ul', { className: 'space-y-1 text-xs text-slate-300 list-disc list-inside' },
+            storyUnknowns.map((item, idx) => h('li', { key: idx }, String(item)))
+          ),
+        ),
+
+        topEvidence.length > 0 && h('div', { className: 'mt-3 bg-slate-900/35 rounded-lg px-4 py-3 border border-slate-700/20' },
+          h('div', { className: 'text-[11px] uppercase tracking-wide text-slate-500 mb-2' }, 'Top Evidence'),
+          h('ul', { className: 'space-y-1 text-xs text-slate-300 list-disc list-inside' },
+            topEvidence.map((item, idx) => h('li', { key: idx }, String(item)))
+          ),
+        ),
+
+        blastRadius.length > 0 && h('div', { className: 'mt-3 bg-slate-900/35 rounded-lg px-4 py-3 border border-slate-700/20' },
+          h('div', { className: 'text-[11px] uppercase tracking-wide text-slate-500 mb-2' }, 'Blast Radius'),
+          h('div', { className: 'flex flex-wrap gap-2' },
+            blastRadius.slice(0, 10).map((asset, idx) => h('span', {
+              key: idx,
+              className: 'px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700/40 text-[11px]'
+            }, `${asset.kind}: ${asset.name}`))
+          ),
+        ),
+
+        // Quick stats
+        h('div', { className: 'flex flex-wrap gap-4 mt-3 pt-3 border-t border-slate-700/30 text-xs text-slate-500' },
+          story.rootCauseCategory && h('span', null, 'Category: ', h('span', { className: 'text-slate-300' }, String(story.rootCauseCategory))),
+          story.dbtChangesFound > 0 && h('span', null, 'dbt changes: ', h('span', { className: 'text-amber-400' }, String(story.dbtChangesFound))),
+          story.anomaliesFound > 0  && h('span', null, 'Data anomalies: ', h('span', { className: 'text-red-400' }, String(story.anomaliesFound))),
+          story.affectedModelCount > 0 && h('span', null, 'Affected models: ', h('span', { className: 'text-purple-400' }, String(story.affectedModelCount))),
+          story.changedTables?.length > 0 && h('span', null, 'Changed tables: ', h('span', { className: 'text-blue-400' }, String(story.changedTables.length))),
+        ),
+      );
+
+      const chatPanel = story.workflow === 'incident-autopilot' && story.id
+        ? h('div', { className: 'min-w-0' },
+            h(IncidentChatCard, {
+              incidentId: story.id,
+              severity: sev || 'P3',
+              suggestedPrompts: [
+                'What exactly failed?',
+                'Show the dbt lineage behind this failure.',
+                'What does Snowflake say about the impacted object?',
+                'What should I check next?'
+              ],
+            })
+          )
+        : null;
+
+      return h('div', { className: `rounded-xl border px-5 py-4 ${severityColors[sev] ?? 'border-indigo-500/30 bg-indigo-950/20'}` },
+        h('div', { className: chatPanel ? 'grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)] xl:items-start' : 'block' },
+          h('div', { className: 'min-w-0' }, storyDetails),
+          chatPanel,
+        ),
+      );
+    }
+
+    function IncidentChatCard({ incidentId, severity, suggestedPrompts = [] }) {
+      const [chat, setChat] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [sending, setSending] = useState(false);
+      const [question, setQuestion] = useState('');
+      const [error, setError] = useState(null);
+      const messagesRef = useRef(null);
+
+      const loadChat = useCallback(async () => {
+        if (!incidentId) return;
+        try {
+          setLoading(true);
+          const data = await api(`incidents/${incidentId}/chat`);
+          setChat(data);
+          setError(null);
+        } catch (err) {
+          setError(err.message || String(err));
+        } finally {
+          setLoading(false);
+        }
+      }, [incidentId]);
+
+      useEffect(() => {
+        loadChat();
+      }, [loadChat]);
+
+      useEffect(() => {
+        if (!messagesRef.current) return;
+        messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
+      }, [chat?.messages?.length, sending]);
+
+      const submitQuestion = useCallback(async (promptText) => {
+        const nextQuestion = String(promptText || question).trim();
+        if (!nextQuestion) return;
+
+        try {
+          setSending(true);
+          setError(null);
+          const result = await apiPost(`incidents/${incidentId}/chat`, { question: nextQuestion });
+          setQuestion('');
+          setChat((prev) => ({
+            ...(prev || {}),
+            incidentRunId: result.incidentRunId,
+            messages: [...(prev?.messages || []), ...(result.messages || [])],
+            suggestedQuestions: result.suggestedQuestions || prev?.suggestedQuestions || [],
+            workspace: result.workspace || prev?.workspace || null,
+          }));
+        } catch (err) {
+          setError(err.message || String(err));
+        } finally {
+          setSending(false);
+        }
+      }, [incidentId, question]);
+
+      const prompts = (chat?.suggestedQuestions?.length ? chat.suggestedQuestions : suggestedPrompts).slice(0, 4);
+      const latestAssistantMessage = [...(chat?.messages || [])].reverse().find((message) => message.role === 'assistant') || null;
+
+      return h('div', { className: 'h-full bg-slate-950/45 rounded-xl px-4 py-4 border border-slate-700/30 backdrop-blur-sm' },
+        h('div', { className: 'flex items-center justify-between mb-3 gap-3' },
+          h('div', null,
+            h('div', { className: 'text-[11px] uppercase tracking-wide text-slate-500' }, 'DuckPipe Copilot'),
+            h('p', { className: 'text-xs text-slate-400 mt-1 max-w-3xl leading-relaxed' }, `Ask follow-up questions about this ${severity} incident. DuckPipe investigates from the incident context first, then pulls live Airflow, dbt, and Snowflake evidence when available.`),
+          ),
+          h('button', {
+            className: 'text-[11px] px-2 py-1 rounded bg-slate-800 border border-slate-700/40 text-slate-300 hover:text-white',
+            onClick: loadChat,
+            disabled: loading || sending,
+          }, loading ? 'Loading…' : 'Refresh'),
+        ),
+
+        error && h('div', { className: 'mb-3 rounded border border-red-800/40 bg-red-950/30 px-3 py-2 text-xs text-red-300' }, error),
+
+        chat?.workspace && h('div', { className: 'mb-3 rounded-lg bg-slate-900/50 border border-slate-700/30 px-3 py-2' },
+          h('div', { className: 'text-[10px] uppercase tracking-wide text-slate-500 mb-2' }, 'Incident Workspace'),
+          h('div', { className: 'grid grid-cols-2 gap-2 text-[11px] text-slate-300' },
+            h('div', null, `Facts remembered: ${chat.workspace.facts?.length ?? chat.workspace.factCount ?? 0}`),
+            h('div', null, `Hypotheses tracked: ${chat.workspace.hypothesisCount ?? 0}`),
+            h('div', null, `Chat turns: ${chat.workspace.conversationCount ?? chat.workspace.messageCount ?? 0}`),
+            h('div', null, `Updated: ${fmtTime(chat.workspace.lastUpdated)}`),
+          ),
+          Array.isArray(chat.workspace.openQuestions) && chat.workspace.openQuestions.length > 0 && h('div', { className: 'mt-2' },
+            h('div', { className: 'text-[10px] uppercase tracking-wide text-slate-500 mb-1' }, 'Open Questions'),
+            h('ul', { className: 'space-y-1 text-[11px] text-slate-300 list-disc list-inside' },
+              chat.workspace.openQuestions.slice(0, 3).map((item, idx) => h('li', { key: idx }, item))
+            ),
+          ),
+        ),
+
+        latestAssistantMessage && h('div', { className: 'mb-3 rounded-lg bg-brand-950/20 border border-brand-800/30 px-3 py-2' },
+          h('div', { className: 'text-[10px] uppercase tracking-wide text-brand-300 mb-1' }, 'Latest Answer'),
+          h('p', { className: 'text-xs text-slate-200 whitespace-pre-wrap leading-relaxed' }, latestAssistantMessage.content),
+        ),
+
+        h('div', { ref: messagesRef, className: 'space-y-2 min-h-[18rem] max-h-[32rem] overflow-y-auto pr-1 scroll-smooth' },
+          (!chat?.messages || chat.messages.length === 0)
+            ? h('div', { className: 'text-xs text-slate-500 py-3 leading-relaxed' }, 'No conversation yet. Start with a suggested prompt or ask your own question in natural language.')
+            : chat.messages.map((message) => h('div', {
+                key: message.id,
+                className: `rounded-lg px-3 py-2 text-xs border ${message.role === 'assistant' ? 'bg-slate-800/70 border-slate-700/40 text-slate-200' : 'bg-brand-950/30 border-brand-800/40 text-brand-100'}`,
+              },
+                h('div', { className: 'flex items-center justify-between mb-1 gap-3' },
+                  h('span', { className: 'uppercase tracking-wide text-[10px] text-slate-500' }, message.role === 'assistant' ? 'DuckPipe Investigator' : 'You'),
+                  h('span', { className: 'text-[10px] text-slate-600 whitespace-nowrap' }, fmtTime(message.createdAt)),
+                ),
+                h('p', { className: 'whitespace-pre-wrap leading-relaxed' }, message.content),
+                message.role === 'assistant' && message.metadata?.investigation?.hypotheses?.length > 0 && h('div', { className: 'mt-2 space-y-2' },
+                  h('div', { className: 'text-[10px] uppercase tracking-wide text-slate-500' }, 'Hypotheses'),
+                  h('div', { className: 'space-y-1' },
+                    message.metadata.investigation.hypotheses.slice(0, 3).map((item, idx) => h('div', {
+                      key: idx,
+                      className: 'rounded bg-slate-900/70 border border-slate-700/30 px-2 py-1.5 text-[11px] text-slate-300'
+                    }, `${item.status.toUpperCase()} · ${item.summary}`))
+                  ),
+                ),
+                message.role === 'assistant' && message.metadata?.investigation?.facts?.length > 0 && h('div', { className: 'mt-2 space-y-2' },
+                  h('div', { className: 'text-[10px] uppercase tracking-wide text-slate-500' }, 'Facts'),
+                  h('ul', { className: 'space-y-1 text-[11px] text-slate-300 list-disc list-inside' },
+                    message.metadata.investigation.facts.slice(0, 4).map((item, idx) => h('li', { key: idx }, item.summary))
+                  ),
+                ),
+                message.role === 'assistant' && message.metadata?.investigation?.objectChecks?.length > 0 && h('div', { className: 'mt-2 space-y-2' },
+                  h('div', { className: 'text-[10px] uppercase tracking-wide text-slate-500' }, 'Object Checks'),
+                  h('div', { className: 'space-y-1' },
+                    message.metadata.investigation.objectChecks.slice(0, 4).map((item, idx) => h('div', {
+                      key: idx,
+                      className: 'rounded bg-slate-900/70 border border-slate-700/30 px-2 py-1.5 text-[11px] text-slate-300'
+                    }, `${item.objectName} → ${item.status.toUpperCase()} · ${item.detail}`))
+                  ),
+                ),
+                message.role === 'assistant' && (message.metadata?.investigation?.lineage?.failingModels?.length > 0 || message.metadata?.investigation?.lineage?.upstreamSources?.length > 0) && h('div', { className: 'mt-2 space-y-2' },
+                  h('div', { className: 'text-[10px] uppercase tracking-wide text-slate-500' }, 'Lineage'),
+                  h('div', { className: 'space-y-1 text-[11px] text-slate-300' },
+                    message.metadata?.investigation?.lineage?.failingModels?.length > 0 && h('div', null, `Models: ${message.metadata.investigation.lineage.failingModels.slice(0, 4).join(', ')}`),
+                    message.metadata?.investigation?.lineage?.upstreamSources?.length > 0 && h('div', null, `Sources: ${message.metadata.investigation.lineage.upstreamSources.slice(0, 4).join(', ')}`),
+                    message.metadata?.investigation?.lineage?.modelSchemas?.length > 0 && h('div', null, `Schemas: ${message.metadata.investigation.lineage.modelSchemas.slice(0, 4).join(', ')}`),
+                    message.metadata?.investigation?.lineage?.modelPaths?.length > 0 && h('div', null, `Files: ${message.metadata.investigation.lineage.modelPaths.slice(0, 3).join(', ')}`),
+                  ),
+                ),
+                message.role === 'assistant' && message.metadata?.investigation?.nextChecks?.length > 0 && h('div', { className: 'mt-2 space-y-2' },
+                  h('div', { className: 'text-[10px] uppercase tracking-wide text-slate-500' }, 'Next Checks'),
+                  h('ul', { className: 'space-y-1 text-[11px] text-slate-300 list-disc list-inside' },
+                    message.metadata.investigation.nextChecks.slice(0, 3).map((item, idx) => h('li', { key: idx }, item))
+                  ),
+                ),
+                message.role === 'assistant' && message.metadata?.investigation?.priorIncidents?.length > 0 && h('div', { className: 'mt-2 space-y-2' },
+                  h('div', { className: 'text-[10px] uppercase tracking-wide text-slate-500' }, 'Similar Prior Incidents'),
+                  h('div', { className: 'space-y-1' },
+                    message.metadata.investigation.priorIncidents.slice(0, 3).map((item, idx) => h('div', {
+                      key: idx,
+                      className: 'rounded bg-slate-900/60 border border-slate-700/30 px-2 py-1.5 text-[11px] text-slate-300'
+                    }, `${fmtTime(item.startedAt)} · ${item.severity || '—'} · ${item.rootCause || item.incidentRunId}`))
+                  ),
+                ),
+                message.role === 'assistant' && message.metadata?.investigation?.subAgents?.length > 0 && h('div', { className: 'mt-2 space-y-2' },
+                  h('div', { className: 'text-[10px] uppercase tracking-wide text-slate-500' }, 'Specialist Sub-Agents'),
+                  h('div', { className: 'space-y-1' },
+                    message.metadata.investigation.subAgents.slice(0, 5).map((item, idx) => h('div', {
+                      key: idx,
+                      className: 'rounded bg-slate-900/60 border border-slate-700/30 px-2 py-1.5 text-[11px] text-slate-300'
+                    }, `${item.name} · ${item.focus} · ${item.summary}`))
+                  ),
+                ),
+                message.role === 'assistant' && message.metadata?.investigation?.externalContext?.slackMentions?.length > 0 && h('div', { className: 'mt-2 space-y-2' },
+                  h('div', { className: 'text-[10px] uppercase tracking-wide text-slate-500' }, 'Slack Context'),
+                  h('div', { className: 'space-y-1' },
+                    message.metadata.investigation.externalContext.slackMentions.slice(0, 3).map((item, idx) => h('div', {
+                      key: idx,
+                      className: 'rounded bg-slate-900/60 border border-slate-700/30 px-2 py-1.5 text-[11px] text-slate-300'
+                    }, `${item.channel} · ${fmtTime(item.ts)} · ${item.text}`))
+                  ),
+                ),
+                message.role === 'assistant' && message.metadata?.investigation?.externalContext?.jiraIssues?.length > 0 && h('div', { className: 'mt-2 space-y-2' },
+                  h('div', { className: 'text-[10px] uppercase tracking-wide text-slate-500' }, 'Jira Context'),
+                  h('div', { className: 'space-y-1' },
+                    message.metadata.investigation.externalContext.jiraIssues.slice(0, 3).map((item, idx) => h('div', {
+                      key: idx,
+                      className: 'rounded bg-slate-900/60 border border-slate-700/30 px-2 py-1.5 text-[11px] text-slate-300'
+                    }, `${item.key} · ${item.status || '—'} · ${item.summary}`))
+                  ),
+                ),
+                message.role === 'assistant' && message.metadata?.investigation?.externalContext?.confluencePages?.length > 0 && h('div', { className: 'mt-2 space-y-2' },
+                  h('div', { className: 'text-[10px] uppercase tracking-wide text-slate-500' }, 'Confluence Context'),
+                  h('div', { className: 'space-y-1' },
+                    message.metadata.investigation.externalContext.confluencePages.slice(0, 3).map((item, idx) => h('div', {
+                      key: idx,
+                      className: 'rounded bg-slate-900/60 border border-slate-700/30 px-2 py-1.5 text-[11px] text-slate-300'
+                    }, `${item.title} (${item.id})`))
+                  ),
+                ),
+                message.role === 'assistant' && message.metadata?.investigation?.unknowns?.length > 0 && h('div', { className: 'mt-2 space-y-2' },
+                  h('div', { className: 'text-[10px] uppercase tracking-wide text-slate-500' }, 'Unknowns'),
+                  h('ul', { className: 'space-y-1 text-[11px] text-slate-300 list-disc list-inside' },
+                    message.metadata.investigation.unknowns.slice(0, 3).map((item, idx) => h('li', { key: idx }, item))
+                  ),
+                ),
+                message.role === 'assistant' && message.metadata?.investigation?.steps?.length > 0 && h('div', { className: 'mt-2 space-y-2' },
+                  h('div', { className: 'text-[10px] uppercase tracking-wide text-slate-500' }, 'Investigation Steps'),
+                  h('div', { className: 'space-y-1' },
+                    message.metadata.investigation.steps.slice(0, 4).map((step, idx) => h('div', {
+                      key: idx,
+                      className: 'rounded bg-slate-900/60 border border-slate-700/30 px-2 py-1.5 text-[11px] text-slate-300'
+                    }, `${step.title}: ${step.outcome}`))
+                  ),
+                ),
+                message.role === 'assistant' && message.metadata?.sources?.length > 0 && h('div', { className: 'mt-2 flex flex-wrap gap-2' },
+                  message.metadata.sources.slice(0, 5).map((source, idx) => h('span', {
+                    key: idx,
+                    className: 'px-2 py-0.5 rounded bg-slate-900 text-slate-400 border border-slate-700/40 text-[10px]'
+                  }, source))
+                ),
+              )),
+          sending && h('div', { className: 'rounded-lg px-3 py-2 text-xs border bg-slate-800/40 border-slate-700/30 text-slate-300' },
+            h('div', { className: 'flex items-center justify-between mb-1 gap-3' },
+              h('span', { className: 'uppercase tracking-wide text-[10px] text-slate-500' }, 'DuckPipe Investigator'),
+              h('span', { className: 'text-[10px] text-slate-600 whitespace-nowrap' }, 'Thinking…'),
+            ),
+            h('p', { className: 'leading-relaxed text-slate-400' }, 'Running the investigation playbook and gathering context from the incident workspace.'),
+          )
+        ),
+
+        prompts.length > 0 && h('div', { className: 'mt-3 flex flex-wrap gap-2' },
+          prompts.map((prompt, idx) => h('button', {
+            key: idx,
+            className: 'text-[11px] px-2.5 py-1.5 rounded bg-slate-800 border border-slate-700/40 text-slate-300 hover:text-white hover:border-slate-600/60 text-left',
+            onClick: () => submitQuestion(prompt),
+            disabled: sending,
+          }, prompt))
+        ),
+
+        h('div', { className: 'mt-3 flex gap-2 items-end' },
+          h('textarea', {
+            value: question,
+            onChange: (e) => setQuestion(e.target.value),
+            placeholder: 'Ask naturally: Which Snowflake object is missing? Show the lineage. Is this permissions or a missing table?',
+            className: 'flex-1 min-h-[84px] rounded-lg bg-slate-950/70 border border-slate-700/50 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-brand-700/50',
+          }),
+          h('button', {
+            className: 'self-end px-3 py-2 rounded-lg bg-brand-600 text-white text-xs font-medium hover:bg-brand-500 disabled:opacity-50',
+            onClick: () => submitQuestion(question),
+            disabled: sending || !question.trim(),
+          }, sending ? 'Investigating…' : 'Ask'),
+        ),
+      );
+    }
+
     function OverviewPage() {
       const { data: health, loading } = useApi('health');
-      const { data: workflows } = useApi('workflows');
-      const { data: audit } = useApi('audit?limit=20');
+      const { data: agents }          = useApi('agents');
+      const { data: workflows }       = useApi('workflows');
+      const { data: audit }           = useApi('audit?limit=15');
 
       if (loading && !health) return h(Loader);
 
-      const integrations = health?.integrations || {};
-      const integrationList = ['airflow','snowflake','dbt','slack','jira','confluence'];
+      const integrations     = health?.integrations || {};
+      const integrationList  = ['airflow','snowflake','dbt','slack','jira','confluence'];
+      const agentList        = agents || [];
+      const agentsRunning    = agentList.filter(a => a.running).length;
+      const agentsTotal      = agentList.length || 4;
+      const intConnected     = integrationList.filter(k => integrations[k] === 'configured').length;
+      const llmOk            = !!health?.llm_provider;
+      const allAgentsOk      = agentsRunning === agentsTotal && agentsTotal > 0;
+      const anyAgentRunning  = agentsRunning > 0;
 
-      return h('div', { className: 'space-y-6 fade-in' },
-        // Metric cards
-        h('div', { className: 'grid grid-cols-4 gap-4' },
-          h(MetricCard, { icon: AlertTriangle, label: 'Incidents Today', value: fmtNumber(health?.incidents_today || 0), color: (health?.incidents_today || 0) > 0 ? 'red' : 'brand' }),
-          h(MetricCard, { icon: Activity, label: 'Active Workflows', value: (health?.active_workflows?.length ?? 0).toString(), color: 'blue' }),
-          h(MetricCard, { icon: Shield, label: 'Total Audit Actions', value: fmtNumber(health?.total_audit_actions || 0), color: 'brand' }),
-          h(MetricCard, { icon: Zap, label: 'Trust Tier', value: 'Tier ' + (health?.trust_tier || 1), sub: health?.trust_tier === 1 ? 'Read-only' : health?.trust_tier === 2 ? 'Supervised' : 'Autonomous', color: 'amber' }),
-        ),
+      // System health level: ok / warning / error
+      const systemLevel = allAgentsOk && llmOk && intConnected > 0 ? 'ok'
+                        : anyAgentRunning || llmOk ? 'warning'
+                        : 'error';
 
-        // Integration status
-        h(Card, { title: 'Integration Status', icon: Server },
-          h('div', { className: 'flex flex-wrap gap-4' },
-            integrationList.map(name =>
-              h('div', { key: name, className: 'flex items-center gap-2 px-4 py-2.5 bg-slate-900/50 rounded-lg border border-slate-700/30' },
-                h(StatusDot, { status: integrations[name] ?? false }),
-                h('span', { className: 'text-sm font-medium capitalize' }, name),
-                h('span', { className: 'text-xs text-slate-500' }, integrations[name] ? 'Connected' : 'Disabled'),
-              )
+      const systemColors = {
+        ok:      { bar: 'bg-emerald-500/10 border-emerald-500/30', dot: 'bg-emerald-400', text: 'text-emerald-300', label: 'System Healthy' },
+        warning: { bar: 'bg-amber-500/10  border-amber-500/30',  dot: 'bg-amber-400',   text: 'text-amber-300',  label: 'Needs Attention' },
+        error:   { bar: 'bg-red-500/10    border-red-500/30',    dot: 'bg-red-400',      text: 'text-red-300',    label: 'Action Required' },
+      };
+      const sc = systemColors[systemLevel];
+
+      // Build a plain-English status sentence
+      const statusParts = [];
+      if (agentsTotal > 0) statusParts.push(agentsRunning + '/' + agentsTotal + ' agents running');
+      statusParts.push(intConnected + '/' + integrationList.length + ' integrations connected');
+      if (!llmOk) statusParts.push('no LLM key configured');
+      else statusParts.push('LLM: ' + (health.llm_provider === 'anthropic' ? 'Anthropic' : health.llm_provider === 'openai' ? 'OpenAI' : 'Gemini'));
+      statusParts.push('Tier ' + (health?.trust_tier || 1));
+
+      const tierLabel = health?.trust_tier === 1 ? 'Read-only' : health?.trust_tier === 2 ? 'Supervised writes' : 'Autonomous';
+
+      const providerLabel = { anthropic: 'Anthropic Claude', openai: 'OpenAI GPT', gemini: 'Google Gemini' };
+
+      return h('div', { className: 'space-y-5 fade-in' },
+
+        // ── System status banner ──────────────────────────────────────────
+        h('div', { className: `rounded-xl border px-5 py-4 flex items-center justify-between ${sc.bar}` },
+          h('div', { className: 'flex items-center gap-3' },
+            h('span', { className: `w-2.5 h-2.5 rounded-full shrink-0 ${sc.dot}` }),
+            h('div', null,
+              h('p', { className: `text-sm font-semibold ${sc.text}` }, sc.label),
+              h('p', { className: 'text-xs text-slate-400 mt-0.5' }, statusParts.join('  ·  ')),
             ),
+          ),
+          h('div', { className: 'flex items-center gap-2 text-xs text-slate-500' },
+            h('span', null, 'Up ' + (health?.uptime_human || '—')),
+            h('span', { className: 'text-slate-700' }, '·'),
+            h('span', null, health?.team_name || 'DuckPipe'),
           ),
         ),
 
-        // Workflows + Recent alerts
+        // ── Three info columns ────────────────────────────────────────────
         h('div', { className: 'grid grid-cols-3 gap-4' },
-          // Workflow cards
-          h('div', { className: 'col-span-2 space-y-4' },
-            h(Card, { title: 'Workflow Status', icon: Layers },
-              h('div', { className: 'grid grid-cols-2 gap-3' },
-                (workflows || []).map(wf =>
-                  h('div', { key: wf.name, className: `p-3 rounded-lg border transition-colors ${wf.enabled ? 'bg-slate-900/50 border-slate-700/30 hover:border-slate-600/50' : 'bg-slate-900/30 border-slate-800/30 opacity-60'}` },
-                    h('div', { className: 'flex items-center justify-between mb-2' },
-                      h('span', { className: 'text-sm font-medium' }, wf.name),
-                      h(Badge, { label: wf.enabled ? 'Enabled' : 'Disabled', color: wf.enabled ? 'green' : 'slate' }),
-                    ),
-                    h('div', { className: 'flex items-center gap-4 text-xs text-slate-500' },
-                      h('span', null, fmtNumber(wf.total_runs) + ' runs'),
-                      wf.success_count > 0 && h('span', { className: 'text-emerald-400' }, wf.success_count + ' ok'),
-                      wf.fail_count > 0 && h('span', { className: 'text-red-400' }, wf.fail_count + ' failed'),
-                    ),
-                    wf.last_run && h('p', { className: 'text-[11px] text-slate-600 mt-1.5' }, 'Last: ' + fmtTime(wf.last_run.started_at)),
-                  )
-                ),
+
+          // Agents
+          h('div', { className: 'bg-slate-800/80 border border-slate-700/50 rounded-xl p-4' },
+            h('div', { className: 'flex items-center gap-2 mb-3 pb-3 border-b border-slate-700/50' },
+              h(Server, { size: 15, className: 'text-slate-400' }),
+              h('span', { className: 'text-sm font-semibold text-slate-200' }, 'Agents'),
+              h('span', { className: `ml-auto text-xs font-medium px-2 py-0.5 rounded-full ${allAgentsOk ? 'bg-emerald-900/50 text-emerald-400' : anyAgentRunning ? 'bg-amber-900/50 text-amber-400' : 'bg-red-900/50 text-red-400'}` },
+                agentsRunning + '/' + agentsTotal + ' running',
               ),
             ),
+            h('div', { className: 'space-y-2' },
+              agentList.length === 0
+                ? h('p', { className: 'text-xs text-slate-500 italic' }, 'Loading agent status…')
+                : agentList.map(a =>
+                    h('div', { key: a.name, className: 'flex items-center gap-2' },
+                      h(StatusDot, { status: a.running ? 'healthy' : 'failed' }),
+                      h('span', { className: 'text-xs font-medium capitalize flex-1' }, a.name),
+                      h('span', { className: `text-[11px] ${a.running ? 'text-emerald-400' : 'text-red-400'}` },
+                        a.running ? 'running' : 'offline',
+                      ),
+                    ),
+                  ),
+              !anyAgentRunning && agentList.length > 0 &&
+                h('div', { className: 'mt-3 rounded-lg bg-red-950/30 border border-red-800/30 px-3 py-2' },
+                  h('p', { className: 'text-[11px] text-red-300 font-medium mb-0.5' }, 'All agents offline'),
+                  h('p', { className: 'text-[11px] text-slate-400' },
+                    'Check ',
+                    h('span', { className: 'font-mono text-slate-300' }, 'agents.runtime'),
+                    ' in duckpipe.yaml — use ',
+                    h('span', { className: 'font-mono text-amber-300' }, '"process"'),
+                    ' for local dev.',
+                  ),
+                ),
+            ),
           ),
 
-          // Recent alerts
+          // LLM
+          h('div', { className: 'bg-slate-800/80 border border-slate-700/50 rounded-xl p-4' },
+            h('div', { className: 'flex items-center gap-2 mb-3 pb-3 border-b border-slate-700/50' },
+              h(Zap, { size: 15, className: 'text-slate-400' }),
+              h('span', { className: 'text-sm font-semibold text-slate-200' }, 'AI Provider'),
+            ),
+            llmOk
+              ? h('div', { className: 'space-y-2.5' },
+                  h('div', { className: 'flex items-center gap-2' },
+                    h(StatusDot, { status: 'healthy' }),
+                    h('span', { className: 'text-xs font-medium text-emerald-300' },
+                      providerLabel[health.llm_provider] || health.llm_provider,
+                    ),
+                  ),
+                  h('div', { className: 'rounded bg-slate-900/60 px-3 py-2' },
+                    h('p', { className: 'text-[11px] text-slate-500 mb-0.5' }, 'Active model'),
+                    h('p', { className: 'text-xs font-mono text-slate-200' }, health.llm_model || 'provider default'),
+                  ),
+                  h('p', { className: 'text-[11px] text-slate-500' },
+                    'Change model in ',
+                    h('span', { className: 'font-mono text-slate-400' }, 'duckpipe.yaml'),
+                    ' under ',
+                    h('span', { className: 'font-mono text-slate-400' }, 'llm.model'),
+                  ),
+                )
+              : h('div', { className: 'space-y-2' },
+                  h('div', { className: 'flex items-center gap-2' },
+                    h(StatusDot, { status: 'failed' }),
+                    h('span', { className: 'text-xs text-red-300' }, 'No provider configured'),
+                  ),
+                  h('div', { className: 'rounded-lg bg-amber-950/30 border border-amber-700/30 px-3 py-2' },
+                    h('p', { className: 'text-[11px] text-amber-200' }, 'Add one key to .env:'),
+                    h('p', { className: 'text-[11px] font-mono text-slate-300 mt-1 leading-relaxed' },
+                      'ANTHROPIC_API_KEY=…\nOPENAI_API_KEY=…\nGEMINI_API_KEY=…',
+                    ),
+                  ),
+                ),
+          ),
+
+          // Integrations
+          h('div', { className: 'bg-slate-800/80 border border-slate-700/50 rounded-xl p-4' },
+            h('div', { className: 'flex items-center gap-2 mb-3 pb-3 border-b border-slate-700/50' },
+              h(Database, { size: 15, className: 'text-slate-400' }),
+              h('span', { className: 'text-sm font-semibold text-slate-200' }, 'Integrations'),
+              h('span', { className: `ml-auto text-xs font-medium px-2 py-0.5 rounded-full ${intConnected > 0 ? 'bg-emerald-900/50 text-emerald-400' : 'bg-slate-700 text-slate-400'}` },
+                intConnected + ' connected',
+              ),
+            ),
+            h('div', { className: 'space-y-2' },
+              integrationList.map(name => {
+                const st = integrations[name] || 'disabled';
+                return h('div', { key: name, className: 'flex items-center gap-2' },
+                  h(StatusDot, { status: st === 'configured' ? 'healthy' : st === 'no_credentials' ? 'running' : false }),
+                  h('span', { className: 'text-xs font-medium capitalize flex-1' }, name),
+                  h('span', { className: `text-[11px] ${st === 'configured' ? 'text-emerald-400' : st === 'no_credentials' ? 'text-amber-400' : 'text-slate-600'}` },
+                    st === 'configured' ? 'connected' : st === 'no_credentials' ? 'no key' : 'off',
+                  ),
+                );
+              }),
+            ),
+          ),
+        ),
+
+        // ── Trust tier + quick stats ──────────────────────────────────────
+        h('div', { className: 'grid grid-cols-4 gap-4' },
+          h(MetricCard, { icon: Shield, label: 'Trust Tier', value: 'Tier ' + (health?.trust_tier || 1), sub: tierLabel, color: 'brand' }),
+          h(MetricCard, { icon: AlertTriangle, label: 'Incidents Today', value: fmtNumber(health?.incidents_today || 0), color: (health?.incidents_today || 0) > 0 ? 'red' : 'brand' }),
+          h(MetricCard, { icon: Activity, label: 'Active Workflows', value: fmtNumber((health?.active_workflows?.length ?? 0)), color: 'blue' }),
+          h(MetricCard, { icon: Shield, label: 'Audit Actions', value: fmtNumber(health?.total_audit_actions || 0), color: 'brand' }),
+        ),
+
+        // ── Latest story (incident or schema drift) ───────────────────────
+        h(LatestStoryCard),
+
+        // ── Workflow cards + recent activity ──────────────────────────────
+        h('div', { className: 'grid grid-cols-3 gap-4' },
+
+          h('div', { className: 'col-span-2' },
+            h(Card, { title: 'Workflows', icon: Layers },
+              (workflows || []).length === 0
+                ? h(EmptyState, { icon: Layers, message: 'No workflows data yet' })
+                : h('div', { className: 'grid grid-cols-2 gap-3' },
+                    (workflows || []).map(wf =>
+                      h('div', { key: wf.name, className: `p-3 rounded-lg border transition-colors ${wf.enabled ? 'bg-slate-900/50 border-slate-700/30 hover:border-slate-600/50' : 'bg-slate-900/20 border-slate-800/20 opacity-50'}` },
+                        h('div', { className: 'flex items-center justify-between mb-1.5' },
+                          h('span', { className: 'text-xs font-semibold' }, wf.name),
+                          h(Badge, { label: wf.enabled ? 'On' : 'Off', color: wf.enabled ? 'green' : 'slate' }),
+                        ),
+                        h('div', { className: 'flex items-center gap-3 text-[11px] text-slate-500' },
+                          h('span', null, fmtNumber(wf.total_runs || 0) + ' runs'),
+                          wf.success_count > 0 && h('span', { className: 'text-emerald-400' }, '✓ ' + wf.success_count),
+                          wf.fail_count > 0 && h('span', { className: 'text-red-400' }, '✗ ' + wf.fail_count),
+                        ),
+                        wf.last_run && h('p', { className: 'text-[10px] text-slate-600 mt-1' }, 'Last: ' + fmtTime(wf.last_run.started_at)),
+                      )
+                    ),
+                  ),
+            ),
+          ),
+
           h('div', null,
             h(Card, { title: 'Recent Activity', icon: Activity },
-              audit?.entries?.length ? h('div', { className: 'space-y-2 max-h-[400px] overflow-y-auto' },
-                audit.entries.map((e, i) =>
-                  h('div', { key: e.id || i, className: 'flex items-start gap-3 py-2 border-b border-slate-700/30 last:border-0' },
-                    h(StatusDot, { status: e.success ? 'completed' : 'failed' }),
-                    h('div', { className: 'flex-1 min-w-0' },
-                      h('p', { className: 'text-xs font-medium truncate' }, e.tool),
-                      h('p', { className: 'text-[11px] text-slate-500' }, e.agent + ' \u2022 ' + e.workflow),
+              audit?.entries?.length
+                ? h('div', { className: 'space-y-2 max-h-72 overflow-y-auto' },
+                    audit.entries.map((e, i) =>
+                      h('div', { key: e.id || i, className: 'flex items-start gap-2.5 py-2 border-b border-slate-700/30 last:border-0' },
+                        h(StatusDot, { status: e.success ? 'completed' : 'failed' }),
+                        h('div', { className: 'flex-1 min-w-0' },
+                          h('p', { className: 'text-xs font-medium truncate' }, e.tool || '—'),
+                          h('p', { className: 'text-[11px] text-slate-500 truncate' }, e.agent + '  ·  ' + e.workflow),
+                        ),
+                        h('p', { className: 'text-[10px] text-slate-600 whitespace-nowrap' }, fmtTime(e.created_at)),
+                      )
                     ),
-                    h('span', { className: 'text-[10px] text-slate-600 whitespace-nowrap' }, fmtTime(e.created_at)),
                   )
-                ),
-              ) : h(EmptyState, { icon: Activity, message: 'No activity yet' }),
+                : h('div', { className: 'py-8 text-center' },
+                    h(Activity, { size: 32, className: 'mx-auto mb-2 text-slate-700' }),
+                    h('p', { className: 'text-xs text-slate-500' }, 'No activity yet'),
+                    h('p', { className: 'text-[11px] text-slate-600 mt-1' }, 'Activity appears here as workflows run'),
+                  ),
             ),
           ),
         ),
@@ -910,52 +1511,149 @@
       if (loading && !data) return h(Loader);
 
       const agents = data || [];
-      const agentDescriptions = {
-        airflow: { desc: 'Monitors DAG runs, detects failures, identifies root causes from task logs.', tier1: 'Read DAG state, task logs', tier2: '+ Trigger DAG retries', tier3: '+ Auto-retry per policy' },
-        snowflake: { desc: 'Monitors query performance, credit consumption, and kills runaway queries.', tier1: 'Read query history', tier2: '+ Cancel queries (with approval)', tier3: '+ Auto-cancel per policy' },
-        dbt: { desc: 'Detects schema drift, proposes model fixes, opens pull requests.', tier1: 'Read jobs, manifests', tier2: '+ Create branches and PRs', tier3: '+ Auto-PR per policy' },
-        comms: { desc: 'Posts Slack alerts, creates Jira tickets, updates Confluence docs.', tier1: 'Read channels', tier2: '+ Post messages (with approval)', tier3: '+ Auto-post per policy' },
+      const tier   = health?.trust_tier || 1;
+      const runtime = health?.agents_runtime || 'unknown';
+
+      const agentMeta = {
+        airflow:   {
+          icon: '✈',
+          desc: 'Monitors Airflow DAG runs, detects failures, reads task logs, identifies root cause.',
+          needs: 'AIRFLOW_BASE_URL + AIRFLOW_USERNAME + AIRFLOW_PASSWORD in .env',
+          capabilities: [
+            { tier: 1, label: 'Read DAGs, task logs, run history' },
+            { tier: 2, label: 'Trigger DAG retries (Slack approval required)' },
+            { tier: 3, label: 'Auto-retry failed tasks per policy.yaml' },
+          ],
+        },
+        snowflake: {
+          icon: '❄',
+          desc: 'Monitors query performance and Snowflake credit consumption. Identifies and kills runaway queries.',
+          needs: 'SNOWFLAKE_ACCOUNT + SNOWFLAKE_USER + key/password in .env',
+          capabilities: [
+            { tier: 1, label: 'Read query history, warehouse usage' },
+            { tier: 2, label: 'Cancel runaway queries (Slack approval required)' },
+            { tier: 3, label: 'Auto-cancel queries exceeding threshold in policy.yaml' },
+          ],
+        },
+        dbt:       {
+          icon: '🔧',
+          desc: 'Detects schema drift by comparing Snowflake schemas to dbt manifests. Opens fix PRs.',
+          needs: 'DBT_API_TOKEN + DBT_ACCOUNT_ID + GITHUB_TOKEN in .env',
+          capabilities: [
+            { tier: 1, label: 'Read dbt jobs, runs, manifest' },
+            { tier: 2, label: 'Create branches and open fix PRs (Slack approval required)' },
+            { tier: 3, label: 'Auto-open PRs when drift detected per policy.yaml' },
+          ],
+        },
+        comms:     {
+          icon: '📣',
+          desc: 'Posts Slack alerts, creates Jira tickets, and writes Confluence documentation.',
+          needs: 'SLACK_BOT_TOKEN in .env (Jira/Confluence optional)',
+          capabilities: [
+            { tier: 1, label: 'Read Slack channels' },
+            { tier: 2, label: 'Post alerts and approval requests to Slack' },
+            { tier: 3, label: 'Auto-post and create tickets per policy.yaml' },
+          ],
+        },
       };
 
-      return h('div', { className: 'space-y-6 fade-in' },
+      const allOff = agents.length > 0 && agents.every(a => !a.running);
+      const isDocker = runtime === 'docker';
+
+      return h('div', { className: 'space-y-5 fade-in' },
+
+        // Header
         h('div', { className: 'flex items-center justify-between' },
-          h('h2', { className: 'text-lg font-bold' }, 'Agent Status'),
-          h('button', { onClick: refetch, className: 'text-xs text-slate-400 hover:text-white flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700' },
-            h(RefreshCw, { size: 12 }), 'Refresh'),
+          h('div', null,
+            h('h2', { className: 'text-lg font-bold' }, 'Agent Status'),
+            h('p', { className: 'text-sm text-slate-500 mt-0.5' },
+              'Runtime: ',
+              h('span', { className: 'font-mono text-slate-300' }, runtime),
+              '  ·  ',
+              agents.filter(a => a.running).length + '/' + agents.length + ' agents online',
+            ),
+          ),
+          h('button', {
+            onClick: refetch,
+            className: 'text-xs text-slate-400 hover:text-white flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 transition-colors',
+          }, h(RefreshCw, { size: 12 }), 'Refresh'),
         ),
+
+        // Banner when all agents are offline
+        allOff && h('div', { className: 'rounded-xl border border-red-700/40 bg-red-950/30 px-5 py-4' },
+          h('p', { className: 'text-sm font-semibold text-red-300 mb-2' }, 'All agents are offline'),
+          isDocker
+            ? h('div', { className: 'space-y-1 text-xs text-slate-300' },
+                h('p', null, '⚠ Docker images are not yet published to the registry. Switch to process mode for local development:'),
+                h('pre', { className: 'mt-2 bg-slate-900 rounded-lg px-4 py-3 text-slate-300 font-mono text-xs' },
+                  '# In duckpipe.yaml:\nagents:\n  runtime: "process"  # ← change this from "docker"'),
+              )
+            : h('div', { className: 'space-y-1 text-xs text-slate-300' },
+                h('p', null, 'Agents failed to start. Restart DuckPipe and check the terminal output for error details:'),
+                h('pre', { className: 'mt-2 bg-slate-900 rounded-lg px-4 py-3 text-slate-300 font-mono text-xs' },
+                  'npm run dev start -- --dashboard'),
+              ),
+        ),
+
+        // Agent cards
         h('div', { className: 'grid grid-cols-2 gap-4' },
           agents.map(a => {
-            const info = agentDescriptions[a.name] || {};
-            const tier = health?.trust_tier || 1;
-            return h('div', { key: a.name, className: `p-5 rounded-xl border ${a.running ? 'border-emerald-500/20 bg-emerald-500/5' : 'border-red-500/20 bg-red-500/5'}` },
-              h('div', { className: 'flex items-center justify-between mb-3' },
+            const meta = agentMeta[a.name] || { icon: '🤖', desc: '', needs: '', capabilities: [] };
+            return h('div', {
+              key: a.name,
+              className: `rounded-xl border p-5 ${a.running ? 'border-emerald-500/20 bg-slate-800/60' : 'border-slate-700/50 bg-slate-800/30'}`,
+            },
+              // Agent header
+              h('div', { className: 'flex items-start justify-between mb-4' },
                 h('div', { className: 'flex items-center gap-3' },
-                  h('div', { className: `p-2 rounded-lg ${a.running ? 'bg-emerald-500/10' : 'bg-red-500/10'}` },
-                    h(Server, { size: 20, className: a.running ? 'text-emerald-400' : 'text-red-400' }),
+                  h('div', { className: `w-10 h-10 rounded-xl flex items-center justify-center text-xl ${a.running ? 'bg-emerald-500/10' : 'bg-slate-700/50'}` },
+                    meta.icon,
                   ),
                   h('div', null,
-                    h('span', { className: 'text-base font-semibold capitalize' }, a.name),
-                    h('p', { className: 'text-[11px] text-slate-500' }, info.desc || ''),
+                    h('p', { className: 'text-sm font-bold capitalize' }, a.name + ' agent'),
+                    h('p', { className: 'text-[11px] text-slate-500 mt-0.5' }, meta.desc),
                   ),
                 ),
-                h(StatusDot, { status: a.running }),
+                h('div', { className: 'flex flex-col items-end gap-1' },
+                  h('div', { className: `flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium ${a.running ? 'bg-emerald-900/40 text-emerald-400' : 'bg-red-900/30 text-red-400'}` },
+                    h(StatusDot, { status: a.running ? 'healthy' : 'failed' }),
+                    a.running ? 'Running' : 'Offline',
+                  ),
+                ),
               ),
-              h('div', { className: 'space-y-1 mt-3' },
-                h('div', { className: 'flex items-center gap-2' },
-                  h(Badge, { label: 'Tier 1', color: 'green' }),
-                  h('span', { className: 'text-xs text-slate-400' }, info.tier1 || ''),
-                ),
-                tier >= 2 && h('div', { className: 'flex items-center gap-2' },
-                  h(Badge, { label: 'Tier 2', color: 'yellow' }),
-                  h('span', { className: 'text-xs text-slate-400' }, info.tier2 || ''),
-                ),
-                tier >= 3 && h('div', { className: 'flex items-center gap-2' },
-                  h(Badge, { label: 'Tier 3', color: 'purple' }),
-                  h('span', { className: 'text-xs text-slate-400' }, info.tier3 || ''),
+
+              // What it needs (shown when offline)
+              !a.running && h('div', { className: 'rounded-lg bg-slate-900/60 border border-slate-700/50 px-3 py-2 mb-3' },
+                h('p', { className: 'text-[11px] text-slate-500 mb-0.5 font-medium' }, 'Requires'),
+                h('p', { className: 'text-[11px] text-slate-300 font-mono' }, meta.needs),
+              ),
+
+              // Capability tiers
+              h('div', { className: 'space-y-1.5' },
+                meta.capabilities.map(cap =>
+                  h('div', { key: cap.tier, className: `flex items-center gap-2 ${cap.tier > tier ? 'opacity-30' : ''}` },
+                    h('span', { className: `text-[10px] px-1.5 py-0.5 rounded font-medium ${cap.tier === 1 ? 'bg-emerald-900/50 text-emerald-400' : cap.tier === 2 ? 'bg-amber-900/50 text-amber-400' : 'bg-purple-900/50 text-purple-400'}` },
+                      'T' + cap.tier,
+                    ),
+                    h('span', { className: 'text-xs text-slate-400' }, cap.label),
+                  ),
                 ),
               ),
             );
           }),
+
+          // Placeholder cards if no data yet
+          agents.length === 0 && ['airflow','snowflake','dbt','comms'].map(name =>
+            h('div', { key: name, className: 'rounded-xl border border-slate-700/30 bg-slate-800/20 p-5 opacity-40' },
+              h('div', { className: 'flex items-center gap-3' },
+                h('div', { className: 'w-10 h-10 rounded-xl bg-slate-700/30 animate-pulse' }),
+                h('div', null,
+                  h('p', { className: 'text-sm font-bold capitalize' }, name + ' agent'),
+                  h('p', { className: 'text-[11px] text-slate-600 mt-0.5' }, 'Waiting for status…'),
+                ),
+              ),
+            )
+          ),
         ),
       );
     }
@@ -969,7 +1667,7 @@
       const [verifying, setVerifying] = useState(false);
 
       const integrations = health?.integrations || {};
-      const connectedCount = Object.values(integrations).filter(Boolean).length;
+      const connectedCount = Object.values(integrations).filter(v => v === 'configured').length;
       const totalCount = Object.keys(integrations).length;
 
       const steps = [
@@ -1054,8 +1752,8 @@
                   h('p', { className: 'text-slate-400' }, 'Uptime: ' + verifyResult.uptime_human),
                   h('p', { className: 'text-slate-400' }, 'Integrations:'),
                   Object.entries(verifyResult.integrations || {}).map(([k, v]) =>
-                    h('p', { key: k, className: v ? 'text-emerald-400' : 'text-slate-500' },
-                      (v ? '  ✓ ' : '  ✗ ') + k
+                    h('p', { key: k, className: v === 'configured' ? 'text-emerald-400' : v === 'no_credentials' ? 'text-amber-400' : 'text-slate-500' },
+                      (v === 'configured' ? '  ✓ ' : v === 'no_credentials' ? '  ⚠ ' : '  ✗ ') + k + (v === 'no_credentials' ? ' (no credentials)' : v === 'disabled' ? ' (disabled)' : '')
                     )
                   ),
                 ),
@@ -1084,6 +1782,181 @@
             h('p', { className: 'text-xs text-slate-400 mt-1' }, 'Edit duckpipe.yaml and .env to adjust settings, then restart DuckPipe.'),
           ),
           h('button', { onClick: () => setStep(0), className: 'mt-4 px-4 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm hover:bg-slate-700' }, '← Back'),
+        ),
+      );
+    }
+
+    // ── LLM Model Picker component ──────────────────────────────────────────
+    function LlmModelPicker({ health, config }) {
+      const { data: knownModels } = useApi('llm/models');
+      const [selectedProvider, setSelectedProvider] = React.useState(null);
+      const [copied, setCopied] = React.useState('');
+      const [customModel, setCustomModel] = React.useState('');
+
+      const providerNames = { anthropic: 'Anthropic Claude', openai: 'OpenAI GPT', gemini: 'Google Gemini' };
+      const providerKeys  = { anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', gemini: 'GEMINI_API_KEY' };
+      const providerDocs  = {
+        anthropic: 'https://docs.anthropic.com/en/docs/about-claude/models',
+        openai:    'https://platform.openai.com/docs/models',
+        gemini:    'https://ai.google.dev/gemini-api/docs/models/gemini',
+      };
+      const activeProvider = health?.llm_provider;
+      const activeModel    = health?.llm_model;
+      const showProvider   = selectedProvider || activeProvider || 'anthropic';
+      const models         = knownModels?.[showProvider] || [];
+
+      // The model that will appear in the generated YAML snippet
+      const previewModel = customModel.trim() || '';
+
+      function copy(text, id) {
+        navigator.clipboard.writeText(text).catch(() => {});
+        setCopied(id);
+        setTimeout(() => setCopied(''), 2000);
+      }
+
+      function selectModel(id) {
+        setCustomModel(id);
+      }
+
+      const tierColor = { fast: 'text-emerald-400', balanced: 'text-blue-400', powerful: 'text-purple-400' };
+      const tierIcon  = { fast: '⚡', balanced: '⚖️', powerful: '🧠' };
+
+      const yamlSnippet =
+`llm:
+  provider: "${showProvider}"
+  model: "${previewModel}"${previewModel ? '     # ← your chosen model' : '          # blank = provider default (fast & cheap)'}
+  agents:
+    comms: ""   # optional: stronger model for Jira/Confluence writing`;
+
+      return h(Card, { title: 'AI Provider & Model', icon: Zap },
+
+        // Active status bar
+        h('div', { className: 'flex items-center justify-between mb-4 pb-4 border-b border-slate-700' },
+          h('div', { className: 'flex items-center gap-3' },
+            activeProvider ? h(StatusDot, { status: 'healthy' }) : h(StatusDot, { status: 'failed' }),
+            h('div', null,
+              h('p', { className: 'text-sm font-semibold' },
+                activeProvider ? (providerNames[activeProvider] || activeProvider) : 'No provider configured',
+              ),
+              activeModel && h('p', { className: 'text-xs text-slate-400 font-mono mt-0.5' }, activeModel),
+            ),
+          ),
+          h('div', { className: 'flex items-center gap-2' },
+            activeProvider && h('span', { className: 'text-xs px-2 py-1 rounded-full bg-emerald-900/40 text-emerald-400 border border-emerald-700/40' }, 'Active'),
+          ),
+        ),
+
+        // Callout: not restricted to the list
+        h('div', { className: 'flex items-start gap-2 rounded-lg bg-indigo-950/40 border border-indigo-700/40 px-3 py-2 mb-4' },
+          h('span', { className: 'text-indigo-400 mt-0.5 shrink-0' }, 'ℹ'),
+          h('p', { className: 'text-xs text-indigo-200 leading-relaxed' },
+            'You are ',
+            h('strong', null, 'not limited'),
+            ' to the models listed below. Type ',
+            h('strong', null, 'any model ID'),
+            ' in the field at the bottom — DuckPipe passes it directly to the provider API, so brand-new models work on day one without a DuckPipe update.',
+          ),
+        ),
+
+        // Provider tabs
+        h('div', { className: 'flex gap-1 mb-3' },
+          ['anthropic', 'openai', 'gemini'].map(p =>
+            h('button', {
+              key: p,
+              onClick: () => { setSelectedProvider(p); setCustomModel(''); },
+              className: [
+                'px-3 py-1.5 rounded-md text-xs font-medium transition-colors',
+                showProvider === p
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white',
+              ].join(' '),
+            }, providerNames[p]),
+          ),
+          h('a', {
+            href: providerDocs[showProvider],
+            target: '_blank',
+            rel: 'noopener',
+            className: 'ml-auto px-2 py-1.5 text-[11px] text-slate-400 hover:text-white flex items-center gap-1',
+          }, 'See all models →'),
+        ),
+
+        // Known model list for the selected provider
+        h('div', { className: 'space-y-1.5 mb-4 max-h-60 overflow-y-auto pr-0.5' },
+          models.length === 0 && h('p', { className: 'text-xs text-slate-500 italic py-2' }, 'Loading…'),
+          models.map(m =>
+            h('button', {
+              key: m.id,
+              onClick: () => selectModel(m.id),
+              className: [
+                'w-full flex items-center justify-between rounded-lg px-3 py-2 text-left transition-colors',
+                previewModel === m.id
+                  ? 'bg-indigo-900/40 border border-indigo-600/60 ring-1 ring-indigo-500/30'
+                  : m.id === activeModel && activeProvider === showProvider
+                    ? 'bg-slate-800 border border-emerald-700/50'
+                    : 'bg-slate-800/50 border border-slate-700/50 hover:bg-slate-800 hover:border-slate-600',
+              ].join(' '),
+            },
+              h('div', { className: 'flex items-center gap-2 flex-1 min-w-0' },
+                h('span', { className: 'text-sm shrink-0' }, tierIcon[m.tier] || '•'),
+                h('div', { className: 'min-w-0' },
+                  h('p', { className: 'text-xs font-mono text-slate-200 truncate' }, m.id),
+                  h('p', { className: ['text-[11px]', tierColor[m.tier] || 'text-slate-400'].join(' ') }, m.label),
+                ),
+              ),
+              h('div', { className: 'flex items-center gap-1 shrink-0 ml-2' },
+                m.id === activeModel && activeProvider === showProvider &&
+                  h('span', { className: 'text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/50 text-emerald-400 border border-emerald-700/50' }, 'IN USE'),
+                previewModel === m.id &&
+                  h('span', { className: 'text-[10px] px-1.5 py-0.5 rounded bg-indigo-700/50 text-indigo-300 border border-indigo-600/50' }, 'SELECTED'),
+              ),
+            ),
+          ),
+        ),
+
+        // Custom / free-text model input
+        h('div', { className: 'mb-4' },
+          h('label', { className: 'block text-[11px] text-slate-400 mb-1.5 font-medium' },
+            'Model ID — type any model name (including brand-new ones not in the list above)',
+          ),
+          h('div', { className: 'flex gap-2' },
+            h('input', {
+              type: 'text',
+              value: customModel,
+              onInput: e => setCustomModel(e.target.value),
+              placeholder: `e.g. ${showProvider === 'anthropic' ? 'claude-opus-5-beta' : showProvider === 'openai' ? 'gpt-5' : 'gemini-3.0-pro'} — any ID the provider accepts`,
+              className: 'flex-1 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-xs font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30',
+            }),
+            customModel.trim() && h('button', {
+              onClick: () => setCustomModel(''),
+              className: 'px-2 py-1 rounded-lg bg-slate-800 border border-slate-700 text-xs text-slate-400 hover:text-white',
+            }, '✕'),
+          ),
+          h('p', { className: 'text-[10px] text-slate-600 mt-1' },
+            'DuckPipe passes this string directly to the provider API — no validation. Check the provider\'s model list for the exact ID.',
+          ),
+        ),
+
+        // Live YAML snippet
+        h('div', { className: 'rounded-lg bg-slate-900 border border-slate-700 p-3' },
+          h('div', { className: 'flex items-center justify-between mb-2' },
+            h('p', { className: 'text-[11px] text-slate-400 font-medium' },
+              'Paste into ',
+              h('span', { className: 'font-mono' }, 'duckpipe.yaml'),
+              ' and restart',
+            ),
+            h('button', {
+              onClick: () => copy(yamlSnippet, 'yaml-snippet'),
+              className: 'text-[11px] text-slate-400 hover:text-white px-2 py-0.5 rounded bg-slate-800 border border-slate-700 transition-colors',
+            }, copied === 'yaml-snippet' ? '✓ copied!' : 'copy'),
+          ),
+          h('pre', { className: 'text-[11px] text-slate-300 font-mono leading-relaxed overflow-x-auto' }, yamlSnippet),
+        ),
+
+        // API key reminder
+        h('p', { className: 'text-[11px] text-slate-500 mt-3' },
+          'Needs ',
+          h('span', { className: 'text-slate-300 font-mono' }, providerKeys[showProvider] || ''),
+          ' in .env · DuckPipe auto-selects the first provider with a valid key · restart after changing model',
         ),
       );
     }
@@ -1144,17 +2017,20 @@
         h(Card, { title: 'Integration Health', icon: Server },
           h('div', { className: 'grid grid-cols-2 gap-3' },
             integrationList.map(name => {
-              const enabled = integrations[name];
+              const st = integrations[name] || 'disabled';
               const iConfig = config?.integrations?.[name] || {};
-              return h('div', { key: name, className: `p-4 rounded-lg border ${enabled ? 'border-emerald-500/20 bg-emerald-500/5' : 'border-slate-700/30 bg-slate-900/30'}` },
+              const borderCls = st === 'configured' ? 'border-emerald-500/20 bg-emerald-500/5' : st === 'no_credentials' ? 'border-amber-500/20 bg-amber-500/5' : 'border-slate-700/30 bg-slate-900/30';
+              const badgeLabel = st === 'configured' ? 'Connected' : st === 'no_credentials' ? 'No Credentials' : 'Disabled';
+              const badgeColor = st === 'configured' ? 'green' : st === 'no_credentials' ? 'yellow' : 'slate';
+              return h('div', { key: name, className: `p-4 rounded-lg border ${borderCls}` },
                 h('div', { className: 'flex items-center justify-between mb-2' },
                   h('div', { className: 'flex items-center gap-2' },
-                    h(StatusDot, { status: enabled }),
+                    h(StatusDot, { status: st === 'configured' ? 'healthy' : st === 'no_credentials' ? 'failed' : false }),
                     h('span', { className: 'text-sm font-medium capitalize' }, name),
                   ),
-                  h(Badge, { label: enabled ? 'Connected' : 'Disabled', color: enabled ? 'green' : 'slate' }),
+                  h(Badge, { label: badgeLabel, color: badgeColor }),
                 ),
-                enabled && h('div', { className: 'text-[11px] text-slate-500 space-y-0.5' },
+                st !== 'disabled' && h('div', { className: 'text-[11px] text-slate-500 space-y-0.5' },
                   iConfig.base_url && h('p', null, 'URL: ', h('span', { className: 'text-slate-400' }, iConfig.base_url === '\u2022\u2022\u2022\u2022\u2022\u2022' ? 'Configured' : iConfig.base_url)),
                   iConfig.account && h('p', null, 'Account: ', h('span', { className: 'text-slate-400' }, iConfig.account)),
                   iConfig.role && h('p', null, 'Role: ', h('span', { className: 'text-slate-400' }, iConfig.role)),
@@ -1182,6 +2058,9 @@
             ),
           ),
         ),
+
+        // LLM provider + model picker
+        h(LlmModelPicker, { health, config }),
 
         // Raw config
         config && h(Card, { title: 'Configuration (secrets masked)', icon: Terminal },

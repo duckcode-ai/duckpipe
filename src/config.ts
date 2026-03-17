@@ -10,9 +10,38 @@ export function loadConfig(path = "./duckpipe.yaml"): DuckpipeConfig {
     );
   }
 
+  loadDotEnv();
+
   const raw = readFileSync(path, "utf-8");
-  const parsed = parseYaml(raw);
+  const resolved = resolveEnvVars(raw);
+  const parsed = parseYaml(resolved);
   return DuckpipeConfigSchema.parse(parsed);
+}
+
+function loadDotEnv(envPath = "./.env"): void {
+  if (!existsSync(envPath)) return;
+  const content = readFileSync(envPath, "utf-8");
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    let value = trimmed.slice(eqIdx + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (!process.env[key]) {
+      process.env[key] = value;
+    }
+  }
+}
+
+function resolveEnvVars(content: string): string {
+  return content.replace(/\$\{([^}]+)\}/g, (_match, varName) => {
+    return process.env[varName] ?? "";
+  });
 }
 
 export function ensureConfig(
