@@ -1,0 +1,36 @@
+{
+  "name": "airflow",
+  "description": "Apache Airflow REST API integration for DuckPipe",
+  "tools": [
+    {
+      "name": "airflow_list_dags",
+      "description": "List all DAGs and their current state",
+      "writeAction": false
+    },
+    {
+      "name": "airflow_get_dag_runs",
+      "description": "Get recent runs for a specific DAG with status",
+      "writeAction": false
+    },
+    {
+      "name": "airflow_get_task_instances",
+      "description": "List task instances for a run with their state",
+      "writeAction": false
+    },
+    {
+      "name": "airflow_get_task_logs",
+      "description": "Fetch logs for a specific task instance",
+      "writeAction": false
+    },
+    {
+      "name": "airflow_trigger_dag_run",
+      "description": "Trigger a new DAG run",
+      "writeAction": true
+    },
+    {
+      "name": "airflow_clear_task",
+      "description": "Clear a failed task for retry",
+      "writeAction": true
+    }
+  ]
+}

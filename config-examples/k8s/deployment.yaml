@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: duckpipe
+  namespace: duckpipe
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: duckpipe
+  template:
+    metadata:
+      labels:
+        app: duckpipe
+    spec:
+      containers:
+        - name: duckpipe
+          image: ghcr.io/duckcodeai/duckpipe:latest
+          envFrom:
+            - secretRef:
+                name: duckpipe-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: bus
+              mountPath: /app/bus
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: duckpipe-data
+        - name: bus
+          emptyDir: {}

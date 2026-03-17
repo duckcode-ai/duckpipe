@@ -1,0 +1,114 @@
+duckpipe:
+  version: "1"
+  name: "my-data-team"
+  trust_tier: 1  # 1 = read-only | 2 = supervised writes | 3 = autonomous
+
+secrets:
+  backend: "env"  # env | file | hashicorp-vault | aws-secrets-manager
+  # file backend:
+  #   age_key_file: "~/.config/duckpipe/age.key"
+  #   encrypted_secrets_file: "./secrets.age"
+  # hashicorp-vault backend:
+  #   vault_addr: "https://vault.internal:8200"
+  #   vault_token: "${VAULT_TOKEN}"
+  #   vault_path: "secret/data/duckpipe"
+
+agents:
+  runtime: "docker"  # docker | podman | process
+  image_prefix: "ghcr.io/duckcodeai/duckpipe"
+  memory_limit_mb: 512
+  cpu_limit: 0.5
+  timeout_seconds: 120
+
+integrations:
+  airflow:
+    enabled: true
+    base_url: "${AIRFLOW_BASE_URL}"
+    username: "${AIRFLOW_USERNAME}"
+    password: "${AIRFLOW_PASSWORD}"
+    allowed_dags: []  # empty = all DAGs visible
+    verify_ssl: true
+
+  dbt:
+    enabled: true
+    cloud_url: "https://cloud.getdbt.com"
+    api_token: "${DBT_API_TOKEN}"
+    account_id: "${DBT_ACCOUNT_ID}"
+    project_id: "${DBT_PROJECT_ID}"
+
+  snowflake:
+    enabled: true
+    account: "${SNOWFLAKE_ACCOUNT}"
+    user: "${SNOWFLAKE_USER}"
+    password: "${SNOWFLAKE_PASSWORD}"
+    # private_key_path: "${SNOWFLAKE_PRIVATE_KEY_PATH}"
+    role: "DUCKPIPE_READER"
+    warehouse: "${SNOWFLAKE_WAREHOUSE}"
+    database: "${SNOWFLAKE_DATABASE}"
+    watched_databases: []
+
+  slack:
+    enabled: true
+    bot_token: "${SLACK_BOT_TOKEN}"
+    app_token: "${SLACK_APP_TOKEN}"
+    trigger_keyword: "@duckpipe"
+    allowed_channels:
+      - "#data-incidents"
+      - "#data-engineering"
+      - "#data-costs"
+    approval_timeout_seconds: 300
+
+  jira:
+    enabled: true
+    base_url: "${JIRA_BASE_URL}"
+    email: "${JIRA_EMAIL}"
+    api_token: "${JIRA_API_TOKEN}"
+    default_project: "DE"
+
+  confluence:
+    enabled: true
+    base_url: "${CONFLUENCE_BASE_URL}"
+    email: "${CONFLUENCE_EMAIL}"
+    api_token: "${CONFLUENCE_API_TOKEN}"
+    space_key: "DATA"
+    catalog_parent_page: "Data Catalog"
+
+workflows:
+  incident_autopilot:
+    enabled: true
+    poll_interval_seconds: 120
+    auto_page_on_p1: false
+    pagerduty_webhook: "${PAGERDUTY_WEBHOOK_URL}"
+
+  pipeline_whisperer:
+    enabled: true
+    poll_interval_minutes: 15
+    github_repo: "${GITHUB_REPO}"
+    base_branch: "main"
+
+  cost_sentinel:
+    enabled: true
+    poll_interval_minutes: 10
+    cost_alert_threshold_credits: 100
+    kill_threshold_credits: 500
+    weekly_report:
+      enabled: true
+      day: "monday"
+      hour: 8
+
+  knowledge_scribe:
+    enabled: true
+    schedule: "0 2 * * *"
+
+  sla_guardian:
+    enabled: true
+    poll_interval_minutes: 5
+    business_hours:
+      start: 7
+      end: 22
+      timezone: "America/Chicago"
+    monitored_dags: []
+
+  query_sage:
+    enabled: true
+    auto_apply_optimizations: false

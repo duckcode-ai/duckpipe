@@ -1,0 +1,50 @@
+version: "3.8"
+
+services:
+  duckpipe:
+    build: .
+    volumes:
+      - ./data:/app/data
+      - ./bus:/app/bus
+      - /var/run/docker.sock:/var/run/docker.sock
+    env_file:
+      - .env
+    ports:
+      - "9876:9876"
+    restart: unless-stopped
+
+  airflow-agent:
+    build: ./agents/airflow
+    volumes:
+      - ./bus/agents/airflow:/app/bus
+    mem_limit: 512m
+    cpus: 0.5
+    network_mode: none
+    restart: unless-stopped
+
+  dbt-agent:
+    build: ./agents/dbt
+    volumes:
+      - ./bus/agents/dbt:/app/bus
+    mem_limit: 512m
+    cpus: 0.5
+    network_mode: none
+    restart: unless-stopped
+
+  snowflake-agent:
+    build: ./agents/snowflake
+    volumes:
+      - ./bus/agents/snowflake:/app/bus
+    mem_limit: 512m
+    cpus: 0.5
+    network_mode: none
+    restart: unless-stopped
+
+  comms-agent:
+    build: ./agents/comms
+    volumes:
+      - ./bus/agents/comms:/app/bus
+    mem_limit: 512m
+    cpus: 0.5
+    network_mode: none
+    restart: unless-stopped

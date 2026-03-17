@@ -1,0 +1,22 @@
+autonomous:
+  - name: "Retry failed tasks once"
+    agent: airflow
+    action: trigger_dag_run
+    conditions:
+      dag_id_prefix: "ingestion_"
+      retry_count_less_than: 2
+      failure_type: ["timeout", "connection_error"]
+
+  - name: "Kill expensive queries"
+    agent: snowflake
+    action: cancel_query
+    conditions:
+      credits_consumed_greater_than: 50
+      query_age_minutes_greater_than: 30
+      warehouse: ["COMPUTE_WH"]
+
+  - name: "Post Slack alerts"
+    agent: comms
+    action: slack_post_message
+    conditions:
+      channels: ["#data-incidents", "#data-alerts"]

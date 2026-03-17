@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DuckPipe — Observability Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'], mono: ['JetBrains Mono', 'monospace'] },
+          colors: { brand: { 50:'#ecfdf5',100:'#d1fae5',200:'#a7f3d0',300:'#6ee7b7',400:'#34d399',500:'#10b981',600:'#059669',700:'#047857',800:'#065f46',900:'#064e3b' } },
+        },
+      },
+    };
+  </script>
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18.3.1",
+      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+      "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+      "recharts": "https://esm.sh/recharts@2.12.7?external=react,react-dom",
+      "lucide-react": "https://esm.sh/lucide-react@0.462.0?external=react"
+    }
+  }
+  </script>
+  <style>
+    * { scrollbar-width: thin; scrollbar-color: #334155 #0f172a; }
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    .fade-in { animation: fadeIn 0.3s ease-in; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+    @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+    .counter { transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1); }
+    table tbody tr:hover { background-color: rgba(51,65,85,0.4) !important; }
+    .chart-container { min-height: 280px; }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen">
+  <div id="root"></div>
+
+  <script type="module">
+    import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import {
+      AreaChart, Area, BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
+      XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
+    } from 'recharts';
+    import {
+      Activity, AlertTriangle, BarChart3, CheckCircle2, ChevronRight, Clock,
+      CreditCard, Database, Download, ExternalLink, FileText, Filter, Home,
+      Layers, Moon, RefreshCw, Search, Server, Settings, Shield, Sun,
+      Terminal, XCircle, Zap, TrendingUp, Eye, GitBranch, MessageSquare
+    } from 'lucide-react';
+
+    const h = React.createElement;
+    const POLL_INTERVAL = 30000;
+    const COLORS = { success: '#10b981', warning: '#f59e0b', error: '#ef4444', info: '#3b82f6', muted: '#64748b' };
+    const PIE_COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
+
+    // ── API fetch helper ──────────────────────────────────────────────────
+    async function api(path) {
+      const res = await fetch('/api/' + path);
+      if (!res.ok) throw new Error(`API ${res.status}`);
+      return res.json();
+    }
+
+    function useApi(path, deps = []) {
+      const [data, setData] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+      const fetchData = useCallback(async () => {
+        try {
+          setLoading(true);
+          const d = await api(path);
+          setData(d);
+          setError(null);
+        } catch (e) { setError(e.message); }
+        finally { setLoading(false); }
+      }, [path, ...deps]);
+      useEffect(() => { fetchData(); const iv = setInterval(fetchData, POLL_INTERVAL); return () => clearInterval(iv); }, [fetchData]);
+      return { data, loading, error, refetch: fetchData };
+    }
+
+    // ── Formatters ────────────────────────────────────────────────────────
+    function fmtTime(iso) { if (!iso) return '—'; try { return new Date(iso + 'Z').toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', second:'2-digit' }); } catch { return iso; } }
+    function fmtDate(iso) { if (!iso) return '—'; try { return new Date(iso).toLocaleDateString(undefined, { month:'short', day:'numeric' }); } catch { return iso; } }
+    function fmtDuration(ms) { if (!ms && ms !== 0) return '—'; if (ms < 1000) return ms + 'ms'; const s = Math.floor(ms/1000); if (s < 60) return s + 's'; const m = Math.floor(s/60); return m + 'm ' + (s%60) + 's'; }
+    function fmtNumber(n) { if (n == null) return '—'; return n.toLocaleString(); }
+
+    // ── Shared components ─────────────────────────────────────────────────
+    function Badge({ label, color = 'slate' }) {
+      const colors = { green: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30', red: 'bg-red-500/20 text-red-400 border-red-500/30', yellow: 'bg-amber-500/20 text-amber-400 border-amber-500/30', blue: 'bg-blue-500/20 text-blue-400 border-blue-500/30', slate: 'bg-slate-500/20 text-slate-400 border-slate-500/30', purple: 'bg-purple-500/20 text-purple-400 border-purple-500/30' };
+      return h('span', { className: `inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium border ${colors[color] || colors.slate}` }, label);
+    }
+
+    function MetricCard({ icon, label, value, sub, color = 'brand' }) {
+      const iconColors = { brand: 'text-emerald-400 bg-emerald-500/10', red: 'text-red-400 bg-red-500/10', amber: 'text-amber-400 bg-amber-500/10', blue: 'text-blue-400 bg-blue-500/10' };
+      return h('div', { className: 'bg-slate-800/80 border border-slate-700/50 rounded-xl p-5 fade-in hover:border-slate-600/50 transition-colors' },
+        h('div', { className: 'flex items-center gap-3 mb-3' },
+          h('div', { className: `p-2 rounded-lg ${iconColors[color] || iconColors.brand}` }, h(icon, { size: 20 })),
+          h('span', { className: 'text-sm text-slate-400 font-medium' }, label),
+        ),
+        h('div', { className: 'text-3xl font-bold tracking-tight counter' }, value ?? '—'),
+        sub && h('p', { className: 'text-xs text-slate-500 mt-1' }, sub),
+      );
+    }
+
+    function Card({ title, icon, children, actions, className = '' }) {
+      return h('div', { className: `bg-slate-800/80 border border-slate-700/50 rounded-xl fade-in ${className}` },
+        (title || actions) && h('div', { className: 'flex items-center justify-between px-5 py-4 border-b border-slate-700/50' },
+          h('div', { className: 'flex items-center gap-2' },
+            icon && h(icon, { size: 16, className: 'text-slate-400' }),
+            title && h('h3', { className: 'text-sm font-semibold text-slate-200' }, title),
+          ),
+          actions,
+        ),
+        h('div', { className: 'p-5' }, children),
+      );
+    }
+
+    function StatusDot({ status }) {
+      const color = status === 'completed' || status === 'healthy' || status === true ? 'bg-emerald-400' : status === 'running' ? 'bg-blue-400 pulse-dot' : status === 'failed' || status === false ? 'bg-red-400' : 'bg-slate-500';
+      return h('span', { className: `inline-block w-2 h-2 rounded-full ${color}` });
+    }
+
+    function EmptyState({ icon, message }) {
+      return h('div', { className: 'flex flex-col items-center justify-center py-12 text-slate-500' },
+        h(icon, { size: 40, className: 'mb-3 opacity-40' }),
+        h('p', { className: 'text-sm' }, message),
+      );
+    }
+
+    function Loader() {
+      return h('div', { className: 'flex items-center justify-center py-16' },
+        h(RefreshCw, { size: 24, className: 'animate-spin text-slate-500' }),
+      );
+    }
+
+    function DaysToggle({ value, onChange }) {
+      return h('div', { className: 'flex gap-1 bg-slate-900/50 rounded-lg p-1' },
+        [7, 30, 90].map(d =>
+          h('button', {
+            key: d,
+            onClick: () => onChange(d),
+            className: `px-3 py-1 text-xs rounded-md font-medium transition-colors ${value === d ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-slate-200'}`
+          }, d + 'd')
+        )
+      );
+    }
+
+    function ChartTooltip({ active, payload, label, formatter }) {
+      if (!active || !payload?.length) return null;
+      return h('div', { className: 'bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-xs shadow-xl' },
+        h('p', { className: 'text-slate-300 mb-1 font-medium' }, formatter ? formatter(label) : label),
+        payload.map((p, i) => h('p', { key: i, className: 'flex items-center gap-2' },
+          h('span', { className: 'w-2 h-2 rounded-full', style: { background: p.color } }),
+          h('span', { className: 'text-slate-400' }, p.name + ': '),
+          h('span', { className: 'font-medium text-white' }, typeof p.value === 'number' ? p.value.toLocaleString() : p.value),
+        ))
+      );
+    }
+
+    // ── Navigation ────────────────────────────────────────────────────────
+    const NAV_ITEMS = [
+      { id: '', label: 'Overview', icon: Home },
+      { id: 'incidents', label: 'Incidents', icon: AlertTriangle },
+      { id: 'costs', label: 'Cost Monitor', icon: CreditCard },
+      { id: 'pipelines', label: 'Pipeline Health', icon: Layers },
+      { id: 'audit', label: 'Audit Log', icon: Shield },
+      { id: 'settings', label: 'Settings', icon: Settings },
+    ];
+
+    function Sidebar({ page, onNav }) {
+      return h('aside', { className: 'fixed top-0 left-0 w-60 h-screen bg-slate-900 border-r border-slate-800 flex flex-col z-30' },
+        // Logo
+        h('div', { className: 'p-5 border-b border-slate-800' },
+          h('div', { className: 'flex items-center gap-2.5' },
+            h('span', { className: 'text-2xl' }, '\u{1F986}'),
+            h('div', null,
+              h('h1', { className: 'text-base font-bold text-white tracking-tight' }, 'DuckPipe'),
+              h('p', { className: 'text-[10px] text-slate-500 font-medium tracking-wider uppercase' }, 'Observability'),
+            ),
+          ),
+        ),
+        // Nav
+        h('nav', { className: 'flex-1 p-3 space-y-0.5 overflow-y-auto' },
+          NAV_ITEMS.map(item => {
+            const active = page === item.id;
+            return h('button', {
+              key: item.id,
+              onClick: () => onNav(item.id),
+              className: `w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${active ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 border border-transparent'}`
+            },
+              h(item.icon, { size: 18 }),
+              item.label,
+            );
+          })
+        ),
+        // Footer
+        h('div', { className: 'p-4 border-t border-slate-800' },
+          h('a', { href: 'https://duckcode.ai', target: '_blank', className: 'text-[10px] text-slate-600 hover:text-slate-400 flex items-center gap-1' },
+            'Built by Duckcode.ai', h(ExternalLink, { size: 10 }),
+          ),
+        ),
+      );
+    }
+
+    function TopBar({ darkMode, onToggle, health }) {
+      return h('header', { className: 'sticky top-0 z-20 bg-slate-900/80 backdrop-blur-xl border-b border-slate-800/50 px-6 py-3 flex items-center justify-between' },
+        h('div', { className: 'flex items-center gap-4' },
+          health?.team_name && h('span', { className: 'text-sm text-slate-400' }, health.team_name),
+          health?.trust_tier && h(Badge, { label: 'Tier ' + health.trust_tier, color: health.trust_tier === 1 ? 'green' : health.trust_tier === 2 ? 'yellow' : 'purple' }),
+          health?.uptime_human && h('span', { className: 'text-xs text-slate-500 flex items-center gap-1' }, h(Clock, { size: 12 }), 'Up ' + health.uptime_human),
+        ),
+        h('div', { className: 'flex items-center gap-3' },
+          h('button', {
+            onClick: onToggle,
+            className: 'p-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors',
+            title: darkMode ? 'Light mode' : 'Dark mode'
+          }, h(darkMode ? Sun : Moon, { size: 16 })),
+        ),
+      );
+    }
+
+    // ── Page: Overview ────────────────────────────────────────────────────
+    function OverviewPage() {
+      const { data: health, loading } = useApi('health');
+      const { data: workflows } = useApi('workflows');
+      const { data: audit } = useApi('audit?limit=20');
+
+      if (loading && !health) return h(Loader);
+
+      const integrations = health?.integrations || {};
+      const integrationList = ['airflow','snowflake','dbt','slack','jira','confluence'];
+
+      return h('div', { className: 'space-y-6 fade-in' },
+        // Metric cards
+        h('div', { className: 'grid grid-cols-4 gap-4' },
+          h(MetricCard, { icon: AlertTriangle, label: 'Incidents Today', value: fmtNumber(health?.incidents_today || 0), color: (health?.incidents_today || 0) > 0 ? 'red' : 'brand' }),
+          h(MetricCard, { icon: Activity, label: 'Active Workflows', value: (health?.active_workflows?.length ?? 0).toString(), color: 'blue' }),
+          h(MetricCard, { icon: Shield, label: 'Total Audit Actions', value: fmtNumber(health?.total_audit_actions || 0), color: 'brand' }),
+          h(MetricCard, { icon: Zap, label: 'Trust Tier', value: 'Tier ' + (health?.trust_tier || 1), sub: health?.trust_tier === 1 ? 'Read-only' : health?.trust_tier === 2 ? 'Supervised' : 'Autonomous', color: 'amber' }),
+        ),
+
+        // Integration status
+        h(Card, { title: 'Integration Status', icon: Server },
+          h('div', { className: 'flex flex-wrap gap-4' },
+            integrationList.map(name =>
+              h('div', { key: name, className: 'flex items-center gap-2 px-4 py-2.5 bg-slate-900/50 rounded-lg border border-slate-700/30' },
+                h(StatusDot, { status: integrations[name] ?? false }),
+                h('span', { className: 'text-sm font-medium capitalize' }, name),
+                h('span', { className: 'text-xs text-slate-500' }, integrations[name] ? 'Connected' : 'Disabled'),
+              )
+            ),
+          ),
+        ),
+
+        // Workflows + Recent alerts
+        h('div', { className: 'grid grid-cols-3 gap-4' },
+          // Workflow cards
+          h('div', { className: 'col-span-2 space-y-4' },
+            h(Card, { title: 'Workflow Status', icon: Layers },
+              h('div', { className: 'grid grid-cols-2 gap-3' },
+                (workflows || []).map(wf =>
+                  h('div', { key: wf.name, className: `p-3 rounded-lg border transition-colors ${wf.enabled ? 'bg-slate-900/50 border-slate-700/30 hover:border-slate-600/50' : 'bg-slate-900/30 border-slate-800/30 opacity-60'}` },
+                    h('div', { className: 'flex items-center justify-between mb-2' },
+                      h('span', { className: 'text-sm font-medium' }, wf.name),
+                      h(Badge, { label: wf.enabled ? 'Enabled' : 'Disabled', color: wf.enabled ? 'green' : 'slate' }),
+                    ),
+                    h('div', { className: 'flex items-center gap-4 text-xs text-slate-500' },
+                      h('span', null, fmtNumber(wf.total_runs) + ' runs'),
+                      wf.success_count > 0 && h('span', { className: 'text-emerald-400' }, wf.success_count + ' ok'),
+                      wf.fail_count > 0 && h('span', { className: 'text-red-400' }, wf.fail_count + ' failed'),
+                    ),
+                    wf.last_run && h('p', { className: 'text-[11px] text-slate-600 mt-1.5' }, 'Last: ' + fmtTime(wf.last_run.started_at)),
+                  )
+                ),
+              ),
+            ),
+          ),
+
+          // Recent alerts
+          h('div', null,
+            h(Card, { title: 'Recent Activity', icon: Activity },
+              audit?.entries?.length ? h('div', { className: 'space-y-2 max-h-[400px] overflow-y-auto' },
+                audit.entries.map((e, i) =>
+                  h('div', { key: e.id || i, className: 'flex items-start gap-3 py-2 border-b border-slate-700/30 last:border-0' },
+                    h(StatusDot, { status: e.success ? 'completed' : 'failed' }),
+                    h('div', { className: 'flex-1 min-w-0' },
+                      h('p', { className: 'text-xs font-medium truncate' }, e.tool),
+                      h('p', { className: 'text-[11px] text-slate-500' }, e.agent + ' \u2022 ' + e.workflow),
+                    ),
+                    h('span', { className: 'text-[10px] text-slate-600 whitespace-nowrap' }, fmtTime(e.created_at)),
+                  )
+                ),
+              ) : h(EmptyState, { icon: Activity, message: 'No activity yet' }),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // ── Page: Incidents ───────────────────────────────────────────────────
+    function IncidentsPage() {
+      const [days, setDays] = useState(7);
+      const [expanded, setExpanded] = useState(null);
+      const { data, loading } = useApi('incidents?days=' + days, [days]);
+
+      if (loading && !data) return h(Loader);
+
+      const incidents = data?.incidents || [];
+      const dailyCounts = (data?.daily_counts || []).map(d => ({ ...d, day: fmtDate(d.day) }));
+
+      // Parse incidents for categories
+      const categories = {};
+      incidents.forEach(inc => {
+        const r = inc.parsed_result;
+        const cat = r?.rootCauseCategory || r?.root_cause_category || 'unknown';
+        categories[cat] = (categories[cat] || 0) + 1;
+      });
+      const pieData = Object.entries(categories).map(([name, value]) => ({ name, value }));
+
+      const total = incidents.length;
+      const p1 = incidents.filter(i => { const r = i.parsed_result; return r?.severity === 'P1'; }).length;
+      const resolved = incidents.filter(i => i.status === 'completed').length;
+
+      return h('div', { className: 'space-y-6 fade-in' },
+        h('div', { className: 'flex items-center justify-between' },
+          h('h2', { className: 'text-lg font-bold' }, 'Incidents'),
+          h(DaysToggle, { value: days, onChange: setDays }),
+        ),
+
+        // Stats
+        h('div', { className: 'grid grid-cols-4 gap-4' },
+          h(MetricCard, { icon: AlertTriangle, label: 'Total Incidents', value: fmtNumber(total), color: total > 0 ? 'red' : 'brand' }),
+          h(MetricCard, { icon: XCircle, label: 'P1 Critical', value: fmtNumber(p1), color: 'red' }),
+          h(MetricCard, { icon: CheckCircle2, label: 'Resolved', value: fmtNumber(resolved), color: 'brand' }),
+          h(MetricCard, { icon: Clock, label: 'Period', value: days + ' days', color: 'blue' }),
+        ),
+
+        // Charts
+        h('div', { className: 'grid grid-cols-3 gap-4' },
+          h(Card, { title: 'Incidents Over Time', icon: TrendingUp, className: 'col-span-2' },
+            dailyCounts.length > 0 ? h('div', { className: 'chart-container' },
+              h(ResponsiveContainer, { width: '100%', height: 280 },
+                h(AreaChart, { data: dailyCounts },
+                  h('defs', null,
+                    h('linearGradient', { id: 'incGrad', x1: '0', y1: '0', x2: '0', y2: '1' },
+                      h('stop', { offset: '5%', stopColor: COLORS.error, stopOpacity: 0.3 }),
+                      h('stop', { offset: '95%', stopColor: COLORS.error, stopOpacity: 0 }),
+                    ),
+                  ),
+                  h(CartesianGrid, { strokeDasharray: '3 3', stroke: '#1e293b' }),
+                  h(XAxis, { dataKey: 'day', stroke: '#475569', tick: { fontSize: 11 } }),
+                  h(YAxis, { stroke: '#475569', tick: { fontSize: 11 }, allowDecimals: false }),
+                  h(Tooltip, { content: h(ChartTooltip, {}) }),
+                  h(Area, { type: 'monotone', dataKey: 'count', name: 'Incidents', stroke: COLORS.error, fill: 'url(#incGrad)', strokeWidth: 2 }),
+                ),
+              ),
+            ) : h(EmptyState, { icon: BarChart3, message: 'No incident data for this period' }),
+          ),
+
+          h(Card, { title: 'Root Cause Breakdown', icon: Search },
+            pieData.length > 0 ? h(ResponsiveContainer, { width: '100%', height: 280 },
+              h(PieChart, null,
+                h(Pie, { data: pieData, cx: '50%', cy: '50%', innerRadius: 50, outerRadius: 90, paddingAngle: 3, dataKey: 'value', label: ({ name, percent }) => name + ' ' + (percent * 100).toFixed(0) + '%' },
+                  pieData.map((_, i) => h(Cell, { key: i, fill: PIE_COLORS[i % PIE_COLORS.length] })),
+                ),
+                h(Tooltip, {}),
+              ),
+            ) : h(EmptyState, { icon: Search, message: 'No category data' }),
+          ),
+        ),
+
+        // Table
+        h(Card, { title: 'Incident Details', icon: FileText },
+          incidents.length > 0 ? h('div', { className: 'overflow-x-auto' },
+            h('table', { className: 'w-full text-sm' },
+              h('thead', null,
+                h('tr', { className: 'border-b border-slate-700/50' },
+                  ['Time', 'Status', 'DAGs', 'Severity', 'Root Cause', ''].map(col =>
+                    h('th', { key: col, className: 'px-3 py-2.5 text-left text-xs font-medium text-slate-500 uppercase tracking-wider' }, col)
+                  ),
+                ),
+              ),
+              h('tbody', null,
+                incidents.map((inc, idx) => {
+                  const r = inc.parsed_result || {};
+                  const isExp = expanded === idx;
+                  return h(React.Fragment, { key: inc.id || idx },
+                    h('tr', {
+                      onClick: () => setExpanded(isExp ? null : idx),
+                      className: `border-b border-slate-700/30 cursor-pointer transition-colors ${idx % 2 ? 'bg-slate-800/30' : ''}`
+                    },
+                      h('td', { className: 'px-3 py-2.5 text-xs whitespace-nowrap' }, fmtTime(inc.started_at)),
+                      h('td', { className: 'px-3 py-2.5' }, h(Badge, { label: inc.status, color: inc.status === 'completed' ? 'green' : inc.status === 'failed' ? 'red' : 'yellow' })),
+                      h('td', { className: 'px-3 py-2.5 text-xs' }, (r.affectedDags || []).join(', ') || '—'),
+                      h('td', { className: 'px-3 py-2.5' }, r.severity ? h(Badge, { label: r.severity, color: r.severity === 'P1' ? 'red' : r.severity === 'P2' ? 'yellow' : 'green' }) : '—'),
+                      h('td', { className: 'px-3 py-2.5 text-xs text-slate-400 max-w-xs truncate' }, r.rootCause || r.root_cause || '—'),
+                      h('td', { className: 'px-3 py-2.5' }, h(ChevronRight, { size: 14, className: `text-slate-500 transition-transform ${isExp ? 'rotate-90' : ''}` })),
+                    ),
+                    isExp && h('tr', null,
+                      h('td', { colSpan: 6, className: 'bg-slate-900/50 px-6 py-4' },
+                        h('div', { className: 'space-y-3 text-xs' },
+                          r.evidence && h('div', null,
+                            h('p', { className: 'text-slate-500 font-medium mb-1' }, 'Evidence'),
+                            h('div', { className: 'space-y-1' }, (r.evidence || []).map((e, i) =>
+                              h('p', { key: i, className: 'font-mono text-slate-400 bg-slate-800 rounded px-2 py-1' }, e)
+                            )),
+                          ),
+                          r.recommendedAction && h('div', null,
+                            h('p', { className: 'text-slate-500 font-medium mb-1' }, 'Recommended Action'),
+                            h('p', { className: 'text-slate-300' }, r.recommendedAction),
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }),
+              ),
+            ),
+          ) : h(EmptyState, { icon: AlertTriangle, message: 'No incidents in this period' }),
+        ),
+      );
+    }
+
+    // ── Page: Cost Monitor ────────────────────────────────────────────────
+    function CostsPage() {
+      const [days, setDays] = useState(7);
+      const { data, loading } = useApi('costs?days=' + days, [days]);
+
+      if (loading && !data) return h(Loader);
+
+      const costRuns = data?.cost_runs || [];
+      const dailyCounts = (data?.daily_counts || []).map(d => ({ ...d, day: fmtDate(d.day) }));
+      const killActions = data?.kill_actions || [];
+
+      // Extract cost data from run results
+      const allQueries = [];
+      const warehouseCosts = {};
+      costRuns.forEach(r => {
+        const pr = r.parsed_result || {};
+        (pr.expensiveQueries || []).forEach(q => {
+          allQueries.push(q);
+          const wh = q.warehouse || 'unknown';
+          warehouseCosts[wh] = (warehouseCosts[wh] || 0) + (q.creditsConsumed || 0);
+        });
+      });
+      const whData = Object.entries(warehouseCosts).map(([name, credits]) => ({ name, credits: Math.round(credits * 100) / 100 })).sort((a,b) => b.credits - a.credits);
+      const topQueries = allQueries.sort((a,b) => (b.creditsConsumed||0) - (a.creditsConsumed||0)).slice(0, 20);
+      const totalCredits = allQueries.reduce((s, q) => s + (q.creditsConsumed || 0), 0);
+
+      return h('div', { className: 'space-y-6 fade-in' },
+        h('div', { className: 'flex items-center justify-between' },
+          h('h2', { className: 'text-lg font-bold' }, 'Cost Monitor'),
+          h(DaysToggle, { value: days, onChange: setDays }),
+        ),
+
+        h('div', { className: 'grid grid-cols-4 gap-4' },
+          h(MetricCard, { icon: CreditCard, label: 'Total Credits', value: totalCredits.toFixed(1), color: totalCredits > 500 ? 'red' : 'amber' }),
+          h(MetricCard, { icon: Database, label: 'Warehouses Tracked', value: Object.keys(warehouseCosts).length.toString(), color: 'blue' }),
+          h(MetricCard, { icon: XCircle, label: 'Queries Killed', value: fmtNumber(killActions.length), color: 'red' }),
+          h(MetricCard, { icon: Eye, label: 'Scans', value: fmtNumber(costRuns.length), color: 'brand' }),
+        ),
+
+        h('div', { className: 'grid grid-cols-3 gap-4' },
+          h(Card, { title: 'Credit Consumption Trend', icon: TrendingUp, className: 'col-span-2' },
+            dailyCounts.length > 0 ? h('div', { className: 'chart-container' },
+              h(ResponsiveContainer, { width: '100%', height: 280 },
+                h(LineChart, { data: dailyCounts },
+                  h(CartesianGrid, { strokeDasharray: '3 3', stroke: '#1e293b' }),
+                  h(XAxis, { dataKey: 'day', stroke: '#475569', tick: { fontSize: 11 } }),
+                  h(YAxis, { stroke: '#475569', tick: { fontSize: 11 } }),
+                  h(Tooltip, { content: h(ChartTooltip, {}) }),
+                  h(Line, { type: 'monotone', dataKey: 'count', name: 'Scans', stroke: COLORS.warning, strokeWidth: 2, dot: { fill: COLORS.warning, r: 3 } }),
+                ),
+              ),
+            ) : h(EmptyState, { icon: BarChart3, message: 'No cost data' }),
+          ),
+
+          h(Card, { title: 'Credits by Warehouse', icon: Database },
+            whData.length > 0 ? h(ResponsiveContainer, { width: '100%', height: 280 },
+              h(BarChart, { data: whData, layout: 'vertical' },
+                h(CartesianGrid, { strokeDasharray: '3 3', stroke: '#1e293b' }),
+                h(XAxis, { type: 'number', stroke: '#475569', tick: { fontSize: 11 } }),
+                h(YAxis, { type: 'category', dataKey: 'name', stroke: '#475569', tick: { fontSize: 11 }, width: 100 }),
+                h(Tooltip, { content: h(ChartTooltip, {}) }),
+                h(Bar, { dataKey: 'credits', name: 'Credits', fill: COLORS.info, radius: [0, 4, 4, 0] }),
+              ),
+            ) : h(EmptyState, { icon: Database, message: 'No warehouse data' }),
+          ),
+        ),
+
+        h(Card, { title: 'Top Expensive Queries', icon: Zap },
+          topQueries.length > 0 ? h('div', { className: 'overflow-x-auto' },
+            h('table', { className: 'w-full text-sm' },
+              h('thead', null,
+                h('tr', { className: 'border-b border-slate-700/50' },
+                  ['Query ID', 'User', 'Warehouse', 'Credits', 'Runtime', 'Preview'].map(col =>
+                    h('th', { key: col, className: 'px-3 py-2.5 text-left text-xs font-medium text-slate-500 uppercase tracking-wider' }, col)
+                  ),
+                ),
+              ),
+              h('tbody', null,
+                topQueries.map((q, idx) =>
+                  h('tr', { key: q.queryId || idx, className: `border-b border-slate-700/30 ${idx % 2 ? 'bg-slate-800/30' : ''}` },
+                    h('td', { className: 'px-3 py-2.5 text-xs font-mono' }, (q.queryId || '').slice(0, 12) + '...'),
+                    h('td', { className: 'px-3 py-2.5 text-xs' }, q.user || '—'),
+                    h('td', { className: 'px-3 py-2.5 text-xs' }, q.warehouse || '—'),
+                    h('td', { className: 'px-3 py-2.5' }, h(Badge, { label: (q.creditsConsumed || 0).toFixed(1), color: (q.creditsConsumed || 0) > 100 ? 'red' : (q.creditsConsumed || 0) > 20 ? 'yellow' : 'green' })),
+                    h('td', { className: 'px-3 py-2.5 text-xs' }, q.runtimeSeconds ? q.runtimeSeconds + 's' : '—'),
+                    h('td', { className: 'px-3 py-2.5 text-xs text-slate-400 max-w-xs truncate font-mono' }, q.queryPreview || '—'),
+                  )
+                ),
+              ),
+            ),
+          ) : h(EmptyState, { icon: CreditCard, message: 'No expensive queries found' }),
+        ),
+
+        killActions.length > 0 && h(Card, { title: 'Killed Queries', icon: XCircle },
+          h('div', { className: 'overflow-x-auto' },
+            h('table', { className: 'w-full text-sm' },
+              h('thead', null,
+                h('tr', { className: 'border-b border-slate-700/50' },
+                  ['Time', 'Tool', 'Approved By', 'Success'].map(col =>
+                    h('th', { key: col, className: 'px-3 py-2.5 text-left text-xs font-medium text-slate-500 uppercase tracking-wider' }, col)
+                  ),
+                ),
+              ),
+              h('tbody', null,
+                killActions.map((a, idx) =>
+                  h('tr', { key: a.id || idx, className: `border-b border-slate-700/30 ${idx % 2 ? 'bg-slate-800/30' : ''}` },
+                    h('td', { className: 'px-3 py-2.5 text-xs' }, fmtTime(a.created_at)),
+                    h('td', { className: 'px-3 py-2.5 text-xs font-mono' }, a.tool),
+                    h('td', { className: 'px-3 py-2.5 text-xs' }, a.approved_by || '—'),
+                    h('td', { className: 'px-3 py-2.5' }, h(StatusDot, { status: a.success === 1 })),
+                  )
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // ── Page: Pipeline Health ─────────────────────────────────────────────
+    function PipelinesPage() {
+      const [days, setDays] = useState(7);
+      const { data, loading } = useApi('pipelines?days=' + days, [days]);
+
+      if (loading && !data) return h(Loader);
+
+      const runHistory = data?.run_history || [];
+      const schemaChanges = data?.schema_changes || [];
+      const slaRuns = data?.sla_runs || [];
+
+      // Build DAG duration chart
+      const dagMap = {};
+      runHistory.forEach(r => {
+        const day = fmtDate(r.recorded_at);
+        if (!dagMap[r.dag_id]) dagMap[r.dag_id] = {};
+        if (!dagMap[r.dag_id][day]) dagMap[r.dag_id][day] = [];
+        dagMap[r.dag_id][day].push(r.duration_seconds);
+      });
+      const dagIds = Object.keys(dagMap).slice(0, 8);
+      const allDays = [...new Set(runHistory.map(r => fmtDate(r.recorded_at)))].sort();
+      const trendData = allDays.map(day => {
+        const entry = { day };
+        dagIds.forEach(id => { entry[id] = dagMap[id]?.[day] ? Math.round(dagMap[id][day].reduce((a,b) => a+b, 0) / dagMap[id][day].length) : null; });
+        return entry;
+      });
+
+      const totalRuns = runHistory.length;
+      const successRuns = runHistory.filter(r => r.status === 'success').length;
+      const slaCompliancePct = totalRuns > 0 ? Math.round((successRuns / totalRuns) * 100) : 100;
+
+      // SLA warnings from sla_runs
+      const slaWarnings = [];
+      slaRuns.forEach(r => {
+        try {
+          const pr = r.result_json ? JSON.parse(r.result_json) : {};
+          if (pr.warnings) slaWarnings.push(...pr.warnings);
+        } catch { /* empty */ }
+      });
+
+      return h('div', { className: 'space-y-6 fade-in' },
+        h('div', { className: 'flex items-center justify-between' },
+          h('h2', { className: 'text-lg font-bold' }, 'Pipeline Health'),
+          h(DaysToggle, { value: days, onChange: setDays }),
+        ),
+
+        h('div', { className: 'grid grid-cols-4 gap-4' },
+          h(MetricCard, { icon: Activity, label: 'DAG Runs', value: fmtNumber(totalRuns), color: 'blue' }),
+          h(MetricCard, { icon: CheckCircle2, label: 'SLA Compliance', value: slaCompliancePct + '%', color: slaCompliancePct >= 95 ? 'brand' : slaCompliancePct >= 80 ? 'amber' : 'red' }),
+          h(MetricCard, { icon: GitBranch, label: 'Schema Changes', value: fmtNumber(schemaChanges.length), color: schemaChanges.length > 0 ? 'amber' : 'brand' }),
+          h(MetricCard, { icon: AlertTriangle, label: 'SLA Warnings', value: fmtNumber(slaWarnings.length), color: slaWarnings.length > 0 ? 'red' : 'brand' }),
+        ),
+
+        // Duration trend
+        h(Card, { title: 'DAG Duration Trends', icon: TrendingUp },
+          trendData.length > 0 ? h('div', { className: 'chart-container' },
+            h(ResponsiveContainer, { width: '100%', height: 300 },
+              h(LineChart, { data: trendData },
+                h(CartesianGrid, { strokeDasharray: '3 3', stroke: '#1e293b' }),
+                h(XAxis, { dataKey: 'day', stroke: '#475569', tick: { fontSize: 11 } }),
+                h(YAxis, { stroke: '#475569', tick: { fontSize: 11 }, label: { value: 'seconds', angle: -90, position: 'insideLeft', style: { fill: '#475569', fontSize: 11 } } }),
+                h(Tooltip, { content: h(ChartTooltip, {}) }),
+                h(Legend, { wrapperStyle: { fontSize: 11 } }),
+                dagIds.map((id, i) =>
+                  h(Line, { key: id, type: 'monotone', dataKey: id, name: id, stroke: PIE_COLORS[i % PIE_COLORS.length], strokeWidth: 2, dot: false, connectNulls: true })
+                ),
+              ),
+            ),
+          ) : h(EmptyState, { icon: Activity, message: 'No run history data' }),
+        ),
+
+        h('div', { className: 'grid grid-cols-2 gap-4' },
+          // Schema drift timeline
+          h(Card, { title: 'Schema Changes', icon: Database },
+            schemaChanges.length > 0 ? h('div', { className: 'space-y-2 max-h-[300px] overflow-y-auto' },
+              schemaChanges.map((sc, i) =>
+                h('div', { key: i, className: 'flex items-center gap-3 py-2 border-b border-slate-700/30 last:border-0' },
+                  h(GitBranch, { size: 14, className: 'text-amber-400 flex-shrink-0' }),
+                  h('div', { className: 'flex-1 min-w-0' },
+                    h('p', { className: 'text-xs font-medium truncate' }, sc.database_name + '.' + sc.schema_name + '.' + sc.table_name),
+                    h('p', { className: 'text-[11px] text-slate-500' }, fmtTime(sc.captured_at)),
+                  ),
+                )
+              ),
+            ) : h(EmptyState, { icon: Database, message: 'No schema changes' }),
+          ),
+
+          // SLA warnings
+          h(Card, { title: 'Active SLA Warnings', icon: AlertTriangle },
+            slaWarnings.length > 0 ? h('div', { className: 'space-y-2 max-h-[300px] overflow-y-auto' },
+              slaWarnings.map((w, i) =>
+                h('div', { key: i, className: 'p-3 rounded-lg bg-amber-500/5 border border-amber-500/20' },
+                  h('p', { className: 'text-xs font-medium text-amber-400' }, w.dag_id || w.dag || 'Unknown DAG'),
+                  h('p', { className: 'text-[11px] text-slate-400 mt-1' }, w.message || 'SLA breach predicted'),
+                  w.probability && h('div', { className: 'mt-2 h-1.5 rounded-full bg-slate-700 overflow-hidden' },
+                    h('div', { className: 'h-full rounded-full bg-amber-500', style: { width: (w.probability * 100) + '%' } }),
+                  ),
+                )
+              ),
+            ) : h(EmptyState, { icon: CheckCircle2, message: 'All DAGs within SLA' }),
+          ),
+        ),
+      );
+    }
+
+    // ── Page: Audit Log ───────────────────────────────────────────────────
+    function AuditPage() {
+      const [days, setDays] = useState(7);
+      const [workflow, setWorkflow] = useState('');
+      const [agent, setAgent] = useState('');
+      const [writeOnly, setWriteOnly] = useState(false);
+      const [selectedRow, setSelectedRow] = useState(null);
+
+      const params = `audit?days=${days}&limit=200${workflow ? '&workflow=' + workflow : ''}${agent ? '&agent=' + agent : ''}${writeOnly ? '&write_only=true' : ''}`;
+      const { data, loading } = useApi(params, [days, workflow, agent, writeOnly]);
+
+      if (loading && !data) return h(Loader);
+
+      const entries = data?.entries || [];
+      const workflowCounts = data?.workflow_counts || [];
+      const agentCounts = data?.agent_counts || [];
+
+      const workflows = ['', 'incident-autopilot', 'cost-sentinel', 'sla-guardian', 'pipeline-whisperer', 'knowledge-scribe', 'query-sage'];
+      const agents = ['', 'airflow', 'dbt', 'snowflake', 'comms'];
+
+      return h('div', { className: 'space-y-6 fade-in' },
+        h('div', { className: 'flex items-center justify-between' },
+          h('h2', { className: 'text-lg font-bold' }, 'Audit Log'),
+          h('div', { className: 'flex items-center gap-3' },
+            h(DaysToggle, { value: days, onChange: setDays }),
+            h('a', {
+              href: `/api/audit/export?format=json&days=${days}`,
+              download: 'duckpipe-audit.json',
+              className: 'flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 border border-slate-700 text-slate-300 hover:text-white hover:border-slate-600 transition-colors'
+            }, h(Download, { size: 12 }), 'JSON'),
+            h('a', {
+              href: `/api/audit/export?format=csv&days=${days}`,
+              download: 'duckpipe-audit.csv',
+              className: 'flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 border border-slate-700 text-slate-300 hover:text-white hover:border-slate-600 transition-colors'
+            }, h(Download, { size: 12 }), 'CSV'),
+          ),
+        ),
+
+        // Filters
+        h(Card, { title: 'Filters', icon: Filter },
+          h('div', { className: 'flex flex-wrap items-center gap-4' },
+            h('div', null,
+              h('label', { className: 'block text-[11px] text-slate-500 mb-1' }, 'Workflow'),
+              h('select', { value: workflow, onChange: e => setWorkflow(e.target.value), className: 'bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 outline-none' },
+                workflows.map(w => h('option', { key: w, value: w }, w || 'All')),
+              ),
+            ),
+            h('div', null,
+              h('label', { className: 'block text-[11px] text-slate-500 mb-1' }, 'Agent'),
+              h('select', { value: agent, onChange: e => setAgent(e.target.value), className: 'bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 outline-none' },
+                agents.map(a => h('option', { key: a, value: a }, a || 'All')),
+              ),
+            ),
+            h('label', { className: 'flex items-center gap-2 cursor-pointer mt-4' },
+              h('input', { type: 'checkbox', checked: writeOnly, onChange: e => setWriteOnly(e.target.checked), className: 'rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500' }),
+              h('span', { className: 'text-xs text-slate-400' }, 'Write actions only'),
+            ),
+          ),
+        ),
+
+        // Summary chips
+        h('div', { className: 'flex flex-wrap gap-2' },
+          workflowCounts.map(wc =>
+            h('div', { key: wc.workflow, className: 'flex items-center gap-2 px-3 py-1.5 bg-slate-800/60 rounded-lg border border-slate-700/30 text-xs' },
+              h('span', { className: 'text-slate-400' }, wc.workflow),
+              h('span', { className: 'font-medium text-white' }, fmtNumber(wc.count)),
+            )
+          ),
+        ),
+
+        // Table
+        h(Card, null,
+          entries.length > 0 ? h('div', { className: 'overflow-x-auto' },
+            h('table', { className: 'w-full text-sm' },
+              h('thead', null,
+                h('tr', { className: 'border-b border-slate-700/50' },
+                  ['Time', 'Workflow', 'Agent', 'Tool', 'Tier', 'Write', 'Approved', 'OK', ''].map(col =>
+                    h('th', { key: col, className: 'px-3 py-2.5 text-left text-xs font-medium text-slate-500 uppercase tracking-wider' }, col)
+                  ),
+                ),
+              ),
+              h('tbody', null,
+                entries.map((e, idx) =>
+                  h(React.Fragment, { key: e.id || idx },
+                    h('tr', {
+                      onClick: () => setSelectedRow(selectedRow === idx ? null : idx),
+                      className: `border-b border-slate-700/30 cursor-pointer transition-colors ${idx % 2 ? 'bg-slate-800/30' : ''}`
+                    },
+                      h('td', { className: 'px-3 py-2 text-xs whitespace-nowrap text-slate-400' }, fmtTime(e.created_at)),
+                      h('td', { className: 'px-3 py-2 text-xs font-medium' }, e.workflow),
+                      h('td', { className: 'px-3 py-2' }, h(Badge, { label: e.agent, color: 'blue' })),
+                      h('td', { className: 'px-3 py-2 text-xs font-mono' }, e.tool),
+                      h('td', { className: 'px-3 py-2 text-xs' }, e.tier),
+                      h('td', { className: 'px-3 py-2' }, e.write_action ? h(Badge, { label: 'write', color: 'yellow' }) : h('span', { className: 'text-xs text-slate-600' }, 'read')),
+                      h('td', { className: 'px-3 py-2 text-xs text-slate-400' }, e.approved_by || '—'),
+                      h('td', { className: 'px-3 py-2' }, h(StatusDot, { status: e.success })),
+                      h('td', { className: 'px-3 py-2' }, h(ChevronRight, { size: 14, className: `text-slate-500 transition-transform ${selectedRow === idx ? 'rotate-90' : ''}` })),
+                    ),
+                    selectedRow === idx && h('tr', null,
+                      h('td', { colSpan: 9, className: 'bg-slate-900/50 px-6 py-4' },
+                        h('div', { className: 'grid grid-cols-2 gap-4 text-xs' },
+                          h('div', null,
+                            h('p', { className: 'text-slate-500 font-medium mb-1' }, 'Input'),
+                            h('pre', { className: 'bg-slate-800 rounded-lg p-3 font-mono text-slate-300 overflow-x-auto max-h-48' },
+                              tryFormat(e.input_json),
+                            ),
+                          ),
+                          h('div', null,
+                            h('p', { className: 'text-slate-500 font-medium mb-1' }, 'Output'),
+                            h('pre', { className: 'bg-slate-800 rounded-lg p-3 font-mono text-slate-300 overflow-x-auto max-h-48' },
+                              tryFormat(e.output_json) || '—',
+                            ),
+                          ),
+                          e.error_message && h('div', { className: 'col-span-2' },
+                            h('p', { className: 'text-red-400 font-medium mb-1' }, 'Error'),
+                            h('p', { className: 'text-red-300 font-mono' }, e.error_message),
+                          ),
+                          e.duration_ms != null && h('p', { className: 'text-slate-500' }, 'Duration: ' + fmtDuration(e.duration_ms)),
+                        ),
+                      ),
+                    ),
+                  )
+                ),
+              ),
+            ),
+          ) : h(EmptyState, { icon: Shield, message: 'No audit entries match your filters' }),
+        ),
+      );
+    }
+
+    function tryFormat(json) {
+      if (!json) return null;
+      try { return JSON.stringify(JSON.parse(json), null, 2); } catch { return json; }
+    }
+
+    // ── Page: Settings ────────────────────────────────────────────────────
+    function SettingsPage() {
+      const { data: health } = useApi('health');
+      const { data: config } = useApi('config');
+      const { data: workflows } = useApi('workflows');
+
+      const integrations = health?.integrations || {};
+      const integrationList = ['airflow', 'snowflake', 'dbt', 'slack', 'jira', 'confluence'];
+
+      const tierInfo = {
+        1: { name: 'Sandbox', desc: 'Read-only mode — observe your stack, zero risk. No writes to any system.', color: 'green', icon: Eye },
+        2: { name: 'Supervised', desc: 'Write actions require Slack approval. Recommended for production.', color: 'yellow', icon: Shield },
+        3: { name: 'Autonomous', desc: 'Pre-approved actions execute automatically per policy.yaml rules.', color: 'purple', icon: Zap },
+      };
+      const currentTier = health?.trust_tier || 1;
+      const tier = tierInfo[currentTier];
+
+      return h('div', { className: 'space-y-6 fade-in' },
+        h('h2', { className: 'text-lg font-bold' }, 'Settings'),
+
+        // Trust tier
+        h(Card, { title: 'Trust Tier', icon: Shield },
+          h('div', { className: 'flex items-start gap-4' },
+            h('div', { className: `p-3 rounded-xl ${tier.color === 'green' ? 'bg-emerald-500/10' : tier.color === 'yellow' ? 'bg-amber-500/10' : 'bg-purple-500/10'}` },
+              h(tier.icon, { size: 28, className: `${tier.color === 'green' ? 'text-emerald-400' : tier.color === 'yellow' ? 'text-amber-400' : 'text-purple-400'}` }),
+            ),
+            h('div', null,
+              h('div', { className: 'flex items-center gap-2 mb-1' },
+                h('span', { className: 'text-xl font-bold' }, 'Tier ' + currentTier),
+                h(Badge, { label: tier.name, color: tier.color }),
+              ),
+              h('p', { className: 'text-sm text-slate-400' }, tier.desc),
+            ),
+          ),
+          h('div', { className: 'grid grid-cols-3 gap-3 mt-5' },
+            [1, 2, 3].map(t => {
+              const ti = tierInfo[t];
+              const isActive = t === currentTier;
+              return h('div', {
+                key: t,
+                className: `p-3 rounded-lg border transition-colors ${isActive ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-slate-700/30 bg-slate-900/30 opacity-60'}`
+              },
+                h('div', { className: 'flex items-center gap-2 mb-1' },
+                  h(ti.icon, { size: 14, className: isActive ? 'text-emerald-400' : 'text-slate-500' }),
+                  h('span', { className: 'text-xs font-medium' }, 'Tier ' + t + ' — ' + ti.name),
+                  isActive && h(Badge, { label: 'Active', color: 'green' }),
+                ),
+                h('p', { className: 'text-[11px] text-slate-500' }, ti.desc),
+              );
+            }),
+          ),
+        ),
+
+        // Integration health
+        h(Card, { title: 'Integration Health', icon: Server },
+          h('div', { className: 'grid grid-cols-2 gap-3' },
+            integrationList.map(name => {
+              const enabled = integrations[name];
+              const iConfig = config?.integrations?.[name] || {};
+              return h('div', { key: name, className: `p-4 rounded-lg border ${enabled ? 'border-emerald-500/20 bg-emerald-500/5' : 'border-slate-700/30 bg-slate-900/30'}` },
+                h('div', { className: 'flex items-center justify-between mb-2' },
+                  h('div', { className: 'flex items-center gap-2' },
+                    h(StatusDot, { status: enabled }),
+                    h('span', { className: 'text-sm font-medium capitalize' }, name),
+                  ),
+                  h(Badge, { label: enabled ? 'Connected' : 'Disabled', color: enabled ? 'green' : 'slate' }),
+                ),
+                enabled && h('div', { className: 'text-[11px] text-slate-500 space-y-0.5' },
+                  iConfig.base_url && h('p', null, 'URL: ', h('span', { className: 'text-slate-400' }, iConfig.base_url === '\u2022\u2022\u2022\u2022\u2022\u2022' ? 'Configured' : iConfig.base_url)),
+                  iConfig.account && h('p', null, 'Account: ', h('span', { className: 'text-slate-400' }, iConfig.account)),
+                  iConfig.role && h('p', null, 'Role: ', h('span', { className: 'text-slate-400' }, iConfig.role)),
+                  iConfig.warehouse && h('p', null, 'Warehouse: ', h('span', { className: 'text-slate-400' }, iConfig.warehouse)),
+                ),
+              );
+            }),
+          ),
+        ),
+
+        // Workflows
+        h(Card, { title: 'Workflow Configuration', icon: Layers },
+          h('div', { className: 'space-y-2' },
+            (workflows || []).map(wf =>
+              h('div', { key: wf.name, className: 'flex items-center justify-between py-3 border-b border-slate-700/30 last:border-0' },
+                h('div', { className: 'flex items-center gap-3' },
+                  h(StatusDot, { status: wf.enabled }),
+                  h('span', { className: 'text-sm font-medium' }, wf.name),
+                ),
+                h('div', { className: 'flex items-center gap-3' },
+                  h(Badge, { label: wf.enabled ? 'Enabled' : 'Disabled', color: wf.enabled ? 'green' : 'slate' }),
+                  h('span', { className: 'text-xs text-slate-500' }, wf.total_runs + ' runs'),
+                ),
+              )
+            ),
+          ),
+        ),
+
+        // Raw config
+        config && h(Card, { title: 'Configuration (secrets masked)', icon: Terminal },
+          h('pre', { className: 'bg-slate-900 rounded-lg p-4 font-mono text-xs text-slate-300 overflow-x-auto max-h-96' },
+            JSON.stringify(config, null, 2),
+          ),
+        ),
+      );
+    }
+
+    // ── App ───────────────────────────────────────────────────────────────
+    function App() {
+      const [page, setPage] = useState(window.location.hash.slice(2) || '');
+      const [darkMode, setDarkMode] = useState(true);
+      const { data: health } = useApi('health');
+
+      useEffect(() => {
+        const onHash = () => setPage(window.location.hash.slice(2) || '');
+        window.addEventListener('hashchange', onHash);
+        return () => window.removeEventListener('hashchange', onHash);
+      }, []);
+
+      const navigate = useCallback((p) => {
+        window.location.hash = p ? '#/' + p : '#/';
+        setPage(p);
+      }, []);
+
+      const toggleDark = useCallback(() => {
+        setDarkMode(d => {
+          const next = !d;
+          document.documentElement.classList.toggle('dark', next);
+          return next;
+        });
+      }, []);
+
+      const pageComponent = useMemo(() => {
+        switch (page) {
+          case 'incidents': return h(IncidentsPage);
+          case 'costs': return h(CostsPage);
+          case 'pipelines': return h(PipelinesPage);
+          case 'audit': return h(AuditPage);
+          case 'settings': return h(SettingsPage);
+          default: return h(OverviewPage);
+        }
+      }, [page]);
+
+      return h('div', { className: 'flex min-h-screen' },
+        h(Sidebar, { page, onNav: navigate }),
+        h('div', { className: 'flex-1 ml-60' },
+          h(TopBar, { darkMode, onToggle: toggleDark, health }),
+          h('main', { className: 'p-6 max-w-[1600px]' }, pageComponent),
+        ),
+      );
+    }
+
+    // ── Mount ─────────────────────────────────────────────────────────────
+    const root = createRoot(document.getElementById('root'));
+    root.render(h(App));
+  </script>
+</body>
+</html>

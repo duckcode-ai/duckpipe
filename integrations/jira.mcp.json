@@ -1,0 +1,16 @@
+{
+  "name": "jira",
+  "description": "Jira issue management integration for DuckPipe",
+  "tools": [
+    {
+      "name": "jira_create_issue",
+      "description": "Create a Jira ticket",
+      "writeAction": true
+    },
+    {
+      "name": "jira_get_issue",
+      "description": "Read a Jira ticket",
+      "writeAction": false
+    }
+  ]
+}

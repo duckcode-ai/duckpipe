@@ -1,0 +1,28 @@
+{
+  "servers": {
+    "airflow": {
+      "config": "./integrations/airflow.mcp.json",
+      "enabled": false
+    },
+    "dbt": {
+      "config": "./integrations/dbt.mcp.json",
+      "enabled": false
+    },
+    "snowflake": {
+      "config": "./integrations/snowflake.mcp.json",
+      "enabled": false
+    },
+    "slack": {
+      "config": "./integrations/slack.mcp.json",
+      "enabled": false
+    },
+    "jira": {
+      "config": "./integrations/jira.mcp.json",
+      "enabled": false
+    },
+    "confluence": {
+      "config": "./integrations/confluence.mcp.json",
+      "enabled": false
+    }
+  }
+}

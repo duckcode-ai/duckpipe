@@ -1,0 +1,31 @@
+{
+  "name": "snowflake",
+  "description": "Snowflake query and monitoring integration for DuckPipe",
+  "tools": [
+    {
+      "name": "snowflake_query",
+      "description": "Execute a SELECT query (read-only role enforced at DB level)",
+      "writeAction": false
+    },
+    {
+      "name": "snowflake_get_query_history",
+      "description": "Fetch QUERY_HISTORY from SNOWFLAKE.ACCOUNT_USAGE",
+      "writeAction": false
+    },
+    {
+      "name": "snowflake_get_query_profile",
+      "description": "Fetch execution plan for a specific query_id",
+      "writeAction": false
+    },
+    {
+      "name": "snowflake_cancel_query",
+      "description": "Cancel a running query by query_id",
+      "writeAction": true
+    },
+    {
+      "name": "snowflake_get_warehouse_usage",
+      "description": "Get credit consumption by warehouse",
+      "writeAction": false
+    }
+  ]
+}

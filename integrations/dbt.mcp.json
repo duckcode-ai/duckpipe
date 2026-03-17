@@ -1,0 +1,26 @@
+{
+  "name": "dbt",
+  "description": "dbt Cloud API integration for DuckPipe",
+  "tools": [
+    {
+      "name": "dbt_list_jobs",
+      "description": "List all dbt jobs in the project",
+      "writeAction": false
+    },
+    {
+      "name": "dbt_get_run",
+      "description": "Get details of a specific run including errors",
+      "writeAction": false
+    },
+    {
+      "name": "dbt_get_manifest",
+      "description": "Fetch the compiled dbt manifest.json",
+      "writeAction": false
+    },
+    {
+      "name": "dbt_list_models",
+      "description": "List all models with their current status",
+      "writeAction": false
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "name": "slack",
+  "description": "Slack messaging integration for DuckPipe",
+  "tools": [
+    {
+      "name": "slack_post_message",
+      "description": "Post to a Slack channel",
+      "writeAction": true
+    },
+    {
+      "name": "slack_post_thread_reply",
+      "description": "Reply in a Slack thread",
+      "writeAction": true
+    },
+    {
+      "name": "slack_get_channel_history",
+      "description": "Read recent messages from a channel",
+      "writeAction": false
+    }
+  ]
+}

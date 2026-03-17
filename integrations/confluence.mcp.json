@@ -1,0 +1,16 @@
+{
+  "name": "confluence",
+  "description": "Confluence documentation integration for DuckPipe",
+  "tools": [
+    {
+      "name": "confluence_create_page",
+      "description": "Create a new Confluence page",
+      "writeAction": true
+    },
+    {
+      "name": "confluence_update_page",
+      "description": "Update an existing Confluence page",
+      "writeAction": true
+    }
+  ]
+}

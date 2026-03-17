@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: duckpipe
+  namespace: duckpipe
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: duckpipe-role
+  namespace: duckpipe
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: duckpipe-rolebinding
+  namespace: duckpipe
+subjects:
+  - kind: ServiceAccount
+    name: duckpipe
+    namespace: duckpipe
+roleRef:
+  kind: Role
+  name: duckpipe-role
+  apiGroup: rbac.authorization.k8s.io
