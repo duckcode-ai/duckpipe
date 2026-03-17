@@ -69,15 +69,16 @@ export async function runPipelineWhisperer(
 
       // Step 5: Post PR link to Slack
       if (config.integrations.slack?.enabled) {
-        await orchestrator.dispatchToAgent(
+        const channel = config.integrations.slack.allowed_channels[0];
+        await orchestrator.executeWriteAction(
           "comms",
           "pipeline-whisperer",
-          "slack_post_drift_summary",
+          "slack_post_message",
           {
-            channel: config.integrations.slack.allowed_channels[0],
-            driftSummary: schemaResult.payload.changedTables,
-            prUrl: dbtResult.payload.prUrl,
-          }
+            channel,
+            text: `🔀 *Schema drift detected*\nChanged tables: ${JSON.stringify(schemaResult.payload.changedTables)}\nPR: ${dbtResult.payload.prUrl ?? "pending"}\n_Detected by DuckPipe — duckcode.ai_`,
+          },
+          { channels: [channel] }
         );
       }
     }

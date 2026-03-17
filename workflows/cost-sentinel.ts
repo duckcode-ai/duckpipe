@@ -29,20 +29,20 @@ export async function runCostSentinel(
 
     // Step 2: Alert on expensive queries
     for (const q of queries) {
-      if (q.creditsConsumed >= alertThreshold) {
-        if (config.integrations.slack?.enabled) {
-          await orchestrator.dispatchToAgent(
-            "comms",
-            "cost-sentinel",
-            "slack_post_cost_alert",
-            {
-              channel: config.integrations.slack.allowed_channels.find((c) =>
-                c.includes("cost")
-              ) ?? config.integrations.slack.allowed_channels[0],
-              query: q,
-            }
-          );
-        }
+      if (q.creditsConsumed >= alertThreshold && config.integrations.slack?.enabled) {
+        const channel = config.integrations.slack.allowed_channels.find((c) =>
+          c.includes("cost")
+        ) ?? config.integrations.slack.allowed_channels[0];
+        await orchestrator.executeWriteAction(
+          "comms",
+          "cost-sentinel",
+          "slack_post_message",
+          {
+            channel,
+            text: `💰 *Expensive query detected*\nQuery: \`${q.queryId}\`\nCredits: ${q.creditsConsumed}  Warehouse: ${q.warehouse}\n_Detected by DuckPipe — duckcode.ai_`,
+          },
+          { channels: [channel] }
+        );
       }
 
       // Step 3: Kill candidate queries

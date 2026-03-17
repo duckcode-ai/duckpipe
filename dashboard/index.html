@@ -64,10 +64,49 @@
     const PIE_COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
     // ── API fetch helper ──────────────────────────────────────────────────
+    const TOKEN = localStorage.getItem('duckpipe_token') || '';
+    function authHeaders() {
+      const h = {};
+      if (TOKEN) h['Authorization'] = 'Bearer ' + TOKEN;
+      return h;
+    }
+
     async function api(path) {
-      const res = await fetch('/api/' + path);
+      const res = await fetch('/api/' + path, { headers: authHeaders() });
+      if (res.status === 401) {
+        localStorage.removeItem('duckpipe_token');
+        window.location.hash = '#/setup';
+        throw new Error('Unauthorized');
+      }
       if (!res.ok) throw new Error(`API ${res.status}`);
       return res.json();
+    }
+
+    // SSE event bus — replaces polling for real-time updates
+    const sseListeners = new Set();
+    let sseConnected = false;
+    function connectSSE() {
+      if (sseConnected) return;
+      try {
+        const url = TOKEN ? '/api/events?token=' + TOKEN : '/api/events';
+        const es = new EventSource(url);
+        es.onmessage = (ev) => {
+          try {
+            const data = JSON.parse(ev.data);
+            sseListeners.forEach(fn => fn(data));
+          } catch {}
+        };
+        es.onerror = () => { sseConnected = false; setTimeout(connectSSE, 5000); };
+        es.onopen = () => { sseConnected = true; };
+      } catch {}
+    }
+    connectSSE();
+
+    function useSSE(handler) {
+      useEffect(() => {
+        sseListeners.add(handler);
+        return () => sseListeners.delete(handler);
+      }, [handler]);
     }
 
     function useApi(path, deps = []) {
@@ -84,6 +123,11 @@
         finally { setLoading(false); }
       }, [path, ...deps]);
       useEffect(() => { fetchData(); const iv = setInterval(fetchData, POLL_INTERVAL); return () => clearInterval(iv); }, [fetchData]);
+      // Refresh on SSE events related to this data
+      const sseHandler = useCallback((ev) => {
+        if (ev.type === 'workflow_complete' || ev.type === 'audit_entry' || ev.type === 'incident') fetchData();
+      }, [fetchData]);
+      useSSE(sseHandler);
       return { data, loading, error, refetch: fetchData };
     }
 
@@ -172,7 +216,10 @@
       { id: 'incidents', label: 'Incidents', icon: AlertTriangle },
       { id: 'costs', label: 'Cost Monitor', icon: CreditCard },
       { id: 'pipelines', label: 'Pipeline Health', icon: Layers },
+      { id: 'approvals', label: 'Approvals', icon: CheckCircle2 },
+      { id: 'agents', label: 'Agents', icon: Server },
       { id: 'audit', label: 'Audit Log', icon: Shield },
+      { id: 'setup', label: 'Setup', icon: Zap },
       { id: 'settings', label: 'Settings', icon: Settings },
     ];
 
@@ -790,6 +837,257 @@
     }
 
     // ── Page: Settings ────────────────────────────────────────────────────
+    // ── Approvals Page ─────────────────────────────────────────────────
+    function ApprovalsPage() {
+      const { data, loading, refetch } = useApi('approvals');
+      if (loading && !data) return h(Loader);
+
+      const pending = data?.pending || [];
+      const completed = data?.completed || [];
+
+      return h('div', { className: 'space-y-6 fade-in' },
+        h('div', { className: 'flex items-center justify-between' },
+          h('h2', { className: 'text-lg font-bold' }, 'Approval Queue'),
+          h('button', { onClick: refetch, className: 'text-xs text-slate-400 hover:text-white flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700' },
+            h(RefreshCw, { size: 12 }), 'Refresh'),
+        ),
+
+        // Pending section
+        h(Card, { title: `Pending (${pending.length})`, icon: Clock },
+          pending.length === 0
+            ? h(EmptyState, { icon: CheckCircle2, message: 'No pending approvals' })
+            : h('div', { className: 'space-y-3' },
+                pending.map((a, i) => h('div', { key: i, className: 'flex items-center justify-between p-3 rounded-lg bg-amber-500/5 border border-amber-500/20' },
+                  h('div', null,
+                    h('div', { className: 'flex items-center gap-2 mb-1' },
+                      h(Badge, { label: a.agent, color: 'blue' }),
+                      h(Badge, { label: a.workflow, color: 'purple' }),
+                      h('span', { className: 'text-sm font-medium' }, a.tool),
+                    ),
+                    h('p', { className: 'text-xs text-slate-500' }, 'Tier ' + a.tier + ' • ' + fmtTime(a.created_at)),
+                  ),
+                  h('div', { className: 'flex gap-2' },
+                    h('span', { className: 'px-3 py-1 rounded bg-amber-500/10 text-amber-400 text-xs font-medium' }, 'Awaiting Slack'),
+                  ),
+                )),
+              ),
+        ),
+
+        // Completed section
+        h(Card, { title: `Recent Decisions (${completed.length})`, icon: Shield },
+          completed.length === 0
+            ? h(EmptyState, { icon: Shield, message: 'No approval history yet' })
+            : h('table', { className: 'w-full text-sm' },
+                h('thead', null, h('tr', { className: 'text-left text-slate-500 border-b border-slate-700/50' },
+                  h('th', { className: 'pb-2 font-medium' }, 'Time'),
+                  h('th', { className: 'pb-2 font-medium' }, 'Workflow'),
+                  h('th', { className: 'pb-2 font-medium' }, 'Agent'),
+                  h('th', { className: 'pb-2 font-medium' }, 'Action'),
+                  h('th', { className: 'pb-2 font-medium' }, 'Approved By'),
+                  h('th', { className: 'pb-2 font-medium' }, 'Status'),
+                )),
+                h('tbody', null, completed.slice(0, 50).map((a, i) =>
+                  h('tr', { key: i, className: 'border-b border-slate-800/50' },
+                    h('td', { className: 'py-2 text-slate-400 font-mono text-xs' }, fmtTime(a.created_at)),
+                    h('td', { className: 'py-2' }, h(Badge, { label: a.workflow, color: 'slate' })),
+                    h('td', { className: 'py-2' }, h(Badge, { label: a.agent, color: 'blue' })),
+                    h('td', { className: 'py-2 font-mono text-xs' }, a.tool),
+                    h('td', { className: 'py-2 text-xs' }, a.approved_by || '—'),
+                    h('td', { className: 'py-2' },
+                      a.success ? h(Badge, { label: 'Approved', color: 'green' }) : h(Badge, { label: 'Rejected', color: 'red' }),
+                    ),
+                  ),
+                )),
+              ),
+        ),
+      );
+    }
+
+    // ── Agents Page ──────────────────────────────────────────────────
+    function AgentsPage() {
+      const { data, loading, refetch } = useApi('agents');
+      const { data: health } = useApi('health');
+      if (loading && !data) return h(Loader);
+
+      const agents = data || [];
+      const agentDescriptions = {
+        airflow: { desc: 'Monitors DAG runs, detects failures, identifies root causes from task logs.', tier1: 'Read DAG state, task logs', tier2: '+ Trigger DAG retries', tier3: '+ Auto-retry per policy' },
+        snowflake: { desc: 'Monitors query performance, credit consumption, and kills runaway queries.', tier1: 'Read query history', tier2: '+ Cancel queries (with approval)', tier3: '+ Auto-cancel per policy' },
+        dbt: { desc: 'Detects schema drift, proposes model fixes, opens pull requests.', tier1: 'Read jobs, manifests', tier2: '+ Create branches and PRs', tier3: '+ Auto-PR per policy' },
+        comms: { desc: 'Posts Slack alerts, creates Jira tickets, updates Confluence docs.', tier1: 'Read channels', tier2: '+ Post messages (with approval)', tier3: '+ Auto-post per policy' },
+      };
+
+      return h('div', { className: 'space-y-6 fade-in' },
+        h('div', { className: 'flex items-center justify-between' },
+          h('h2', { className: 'text-lg font-bold' }, 'Agent Status'),
+          h('button', { onClick: refetch, className: 'text-xs text-slate-400 hover:text-white flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700' },
+            h(RefreshCw, { size: 12 }), 'Refresh'),
+        ),
+        h('div', { className: 'grid grid-cols-2 gap-4' },
+          agents.map(a => {
+            const info = agentDescriptions[a.name] || {};
+            const tier = health?.trust_tier || 1;
+            return h('div', { key: a.name, className: `p-5 rounded-xl border ${a.running ? 'border-emerald-500/20 bg-emerald-500/5' : 'border-red-500/20 bg-red-500/5'}` },
+              h('div', { className: 'flex items-center justify-between mb-3' },
+                h('div', { className: 'flex items-center gap-3' },
+                  h('div', { className: `p-2 rounded-lg ${a.running ? 'bg-emerald-500/10' : 'bg-red-500/10'}` },
+                    h(Server, { size: 20, className: a.running ? 'text-emerald-400' : 'text-red-400' }),
+                  ),
+                  h('div', null,
+                    h('span', { className: 'text-base font-semibold capitalize' }, a.name),
+                    h('p', { className: 'text-[11px] text-slate-500' }, info.desc || ''),
+                  ),
+                ),
+                h(StatusDot, { status: a.running }),
+              ),
+              h('div', { className: 'space-y-1 mt-3' },
+                h('div', { className: 'flex items-center gap-2' },
+                  h(Badge, { label: 'Tier 1', color: 'green' }),
+                  h('span', { className: 'text-xs text-slate-400' }, info.tier1 || ''),
+                ),
+                tier >= 2 && h('div', { className: 'flex items-center gap-2' },
+                  h(Badge, { label: 'Tier 2', color: 'yellow' }),
+                  h('span', { className: 'text-xs text-slate-400' }, info.tier2 || ''),
+                ),
+                tier >= 3 && h('div', { className: 'flex items-center gap-2' },
+                  h(Badge, { label: 'Tier 3', color: 'purple' }),
+                  h('span', { className: 'text-xs text-slate-400' }, info.tier3 || ''),
+                ),
+              ),
+            );
+          }),
+        ),
+      );
+    }
+
+    // ── Setup Wizard Page ────────────────────────────────────────────
+    function SetupPage() {
+      const { data: health } = useApi('health');
+      const [step, setStep] = useState(0);
+      const [token, setToken] = useState(localStorage.getItem('duckpipe_token') || '');
+      const [verifyResult, setVerifyResult] = useState(null);
+      const [verifying, setVerifying] = useState(false);
+
+      const integrations = health?.integrations || {};
+      const connectedCount = Object.values(integrations).filter(Boolean).length;
+      const totalCount = Object.keys(integrations).length;
+
+      const steps = [
+        { label: 'Dashboard Token', desc: 'Secure your dashboard with a bearer token' },
+        { label: 'Verify Connections', desc: 'Test all configured integration connections' },
+        { label: 'Review Status', desc: 'Confirm everything is working' },
+      ];
+
+      const saveToken = () => {
+        if (token.trim()) {
+          localStorage.setItem('duckpipe_token', token.trim());
+          window.location.reload();
+        }
+      };
+
+      const runVerify = async () => {
+        setVerifying(true);
+        try {
+          const result = await api('health');
+          setVerifyResult(result);
+        } catch (e) {
+          setVerifyResult({ error: e.message });
+        }
+        setVerifying(false);
+      };
+
+      const clearToken = () => {
+        localStorage.removeItem('duckpipe_token');
+        window.location.reload();
+      };
+
+      return h('div', { className: 'space-y-6 fade-in max-w-3xl' },
+        h('h2', { className: 'text-lg font-bold' }, 'Setup Wizard'),
+        h('p', { className: 'text-sm text-slate-400' }, 'Configure and verify your DuckPipe installation'),
+
+        // Progress
+        h('div', { className: 'flex items-center gap-2 mb-6' },
+          steps.map((s, i) => h('button', {
+            key: i, onClick: () => setStep(i),
+            className: `flex-1 p-3 rounded-lg border text-left transition-all ${i === step ? 'border-emerald-500/30 bg-emerald-500/5' : i < step ? 'border-emerald-500/10 bg-slate-800' : 'border-slate-700/30 bg-slate-900/30'}`
+          },
+            h('div', { className: 'flex items-center gap-2 mb-1' },
+              h('span', { className: `w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${i <= step ? 'bg-emerald-500 text-white' : 'bg-slate-700 text-slate-400'}` }, i + 1),
+              h('span', { className: 'text-sm font-medium' }, s.label),
+            ),
+            h('p', { className: 'text-[11px] text-slate-500 ml-8' }, s.desc),
+          )),
+        ),
+
+        // Step content
+        step === 0 && h(Card, { title: 'Dashboard Token', icon: Shield },
+          h('p', { className: 'text-sm text-slate-400 mb-4' },
+            'Set DUCKPIPE_DASHBOARD_TOKEN in your .env file, then enter it here. Without a token, the dashboard only binds to localhost.'
+          ),
+          h('div', { className: 'flex gap-2' },
+            h('input', {
+              type: 'password', value: token,
+              onChange: (e) => setToken(e.target.value),
+              placeholder: 'Enter your dashboard token',
+              className: 'flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500'
+            }),
+            h('button', { onClick: saveToken, className: 'px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-500' }, 'Save'),
+            TOKEN && h('button', { onClick: clearToken, className: 'px-4 py-2 rounded-lg bg-red-600/20 text-red-400 text-sm hover:bg-red-600/30' }, 'Clear'),
+          ),
+          TOKEN && h('p', { className: 'text-xs text-emerald-400 mt-2' }, 'Token is saved in your browser.'),
+          h('button', { onClick: () => setStep(1), className: 'mt-4 px-4 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm hover:bg-slate-700' }, 'Next →'),
+        ),
+
+        step === 1 && h(Card, { title: 'Verify Connections', icon: Activity },
+          h('p', { className: 'text-sm text-slate-400 mb-4' },
+            'Test your integration connections. This calls duckpipe verify to check what is configured and accessible.'
+          ),
+          h('button', { onClick: runVerify, disabled: verifying, className: 'px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-500 disabled:opacity-50 mb-4' },
+            verifying ? 'Verifying...' : 'Run Verify'
+          ),
+          verifyResult && h('div', { className: 'mt-3 p-4 rounded-lg bg-slate-900 border border-slate-700 font-mono text-xs space-y-1' },
+            verifyResult.error
+              ? h('p', { className: 'text-red-400' }, 'Error: ' + verifyResult.error)
+              : h('div', null,
+                  h('p', { className: 'text-emerald-400' }, '✓ Connected — Tier ' + verifyResult.trust_tier),
+                  h('p', { className: 'text-slate-400' }, 'Team: ' + verifyResult.team_name),
+                  h('p', { className: 'text-slate-400' }, 'Uptime: ' + verifyResult.uptime_human),
+                  h('p', { className: 'text-slate-400' }, 'Integrations:'),
+                  Object.entries(verifyResult.integrations || {}).map(([k, v]) =>
+                    h('p', { key: k, className: v ? 'text-emerald-400' : 'text-slate-500' },
+                      (v ? '  ✓ ' : '  ✗ ') + k
+                    )
+                  ),
+                ),
+          ),
+          h('div', { className: 'flex gap-2 mt-4' },
+            h('button', { onClick: () => setStep(0), className: 'px-4 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm hover:bg-slate-700' }, '← Back'),
+            h('button', { onClick: () => setStep(2), className: 'px-4 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm hover:bg-slate-700' }, 'Next →'),
+          ),
+        ),
+
+        step === 2 && h(Card, { title: 'Status Summary', icon: CheckCircle2 },
+          h('div', { className: 'grid grid-cols-2 gap-4' },
+            h('div', { className: 'p-4 rounded-lg bg-slate-900 border border-slate-700' },
+              h('p', { className: 'text-sm font-medium mb-2' }, 'Integrations'),
+              h('p', { className: 'text-2xl font-bold text-emerald-400' }, connectedCount + '/' + totalCount),
+              h('p', { className: 'text-xs text-slate-500' }, 'connected'),
+            ),
+            h('div', { className: 'p-4 rounded-lg bg-slate-900 border border-slate-700' },
+              h('p', { className: 'text-sm font-medium mb-2' }, 'Trust Tier'),
+              h('p', { className: 'text-2xl font-bold' }, health?.trust_tier || '—'),
+              h('p', { className: 'text-xs text-slate-500' }, health?.trust_tier === 1 ? 'Read-only' : health?.trust_tier === 2 ? 'Supervised' : 'Autonomous'),
+            ),
+          ),
+          h('div', { className: 'mt-4 p-4 rounded-lg bg-emerald-500/5 border border-emerald-500/20' },
+            h('p', { className: 'text-sm text-emerald-400 font-medium' }, '🦆 DuckPipe is configured!'),
+            h('p', { className: 'text-xs text-slate-400 mt-1' }, 'Edit duckpipe.yaml and .env to adjust settings, then restart DuckPipe.'),
+          ),
+          h('button', { onClick: () => setStep(0), className: 'mt-4 px-4 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm hover:bg-slate-700' }, '← Back'),
+        ),
+      );
+    }
+
     function SettingsPage() {
       const { data: health } = useApi('health');
       const { data: config } = useApi('config');
@@ -924,6 +1222,9 @@
           case 'incidents': return h(IncidentsPage);
           case 'costs': return h(CostsPage);
           case 'pipelines': return h(PipelinesPage);
+          case 'approvals': return h(ApprovalsPage);
+          case 'agents': return h(AgentsPage);
+          case 'setup': return h(SetupPage);
           case 'audit': return h(AuditPage);
           case 'settings': return h(SettingsPage);
           default: return h(OverviewPage);

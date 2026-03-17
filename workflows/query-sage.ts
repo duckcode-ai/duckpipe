@@ -66,17 +66,24 @@ export async function runQuerySage(
 
     // Step 4: Post reply in Slack thread
     if (config.integrations.slack?.enabled) {
-      await orchestrator.dispatchToAgent(
+      const replyText = [
+        `📊 *Query Analysis — ${entityName}*`,
+        analysisResult.payload.explanation as string ?? "",
+        analysisResult.payload.rewrittenSql ? `\`\`\`sql\n${analysisResult.payload.rewrittenSql}\n\`\`\`` : "",
+        analysisResult.payload.estimatedSavings ? `Estimated savings: ${analysisResult.payload.estimatedSavings} credits` : "",
+        "_Analyzed by DuckPipe — duckcode.ai_",
+      ].filter(Boolean).join("\n");
+
+      await orchestrator.executeWriteAction(
         "comms",
         "query-sage",
         "slack_post_thread_reply",
         {
           channel: slackMessage.channel,
-          threadTs: slackMessage.ts,
-          explanation: analysisResult.payload.explanation,
-          rewrittenSql: analysisResult.payload.rewrittenSql,
-          estimatedSavings: analysisResult.payload.estimatedSavings,
-        }
+          thread_ts: slackMessage.ts,
+          text: replyText,
+        },
+        { channels: [slackMessage.channel] }
       );
     }
 

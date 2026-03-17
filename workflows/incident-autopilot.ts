@@ -62,23 +62,18 @@ export async function runIncidentAutopilot(
     const category = failures.rootCauseCategory as string ?? "unknown";
     const severity = classifySeverity(category, failures);
 
-    // Step 5: Post Slack alert (Tier 1+)
+    // Step 5: Post Slack alert
     if (config.integrations.slack?.enabled) {
-      const slackPayload = {
-        channel: config.integrations.slack.allowed_channels[0] ?? "#data-incidents",
-        severity,
-        dagId: event?.dag_id ?? (failures.affectedDags as string[])?.[0],
-        rootCause,
-        category,
-        evidence: failures.evidence ?? [],
-        recommendedAction: failures.recommendedAction ?? "Investigate manually",
-      };
-
-      await orchestrator.dispatchToAgent(
+      const slackChannel = config.integrations.slack.allowed_channels[0] ?? "#data-incidents";
+      await orchestrator.executeWriteAction(
         "comms",
         "incident-autopilot",
-        "slack_post_incident",
-        slackPayload
+        "slack_post_message",
+        {
+          channel: slackChannel,
+          text: `${severity === "P1" ? "🔴" : severity === "P2" ? "🟡" : "🟢"} *${severity} — ${event?.dag_id ?? (failures.affectedDags as string[])?.[0]} failed*\nRoot cause: ${rootCause} (${category})\nRecommended: ${(failures.recommendedAction as string) ?? "Investigate manually"}\n_Detected by DuckPipe — duckcode.ai_`,
+        },
+        { severity, channels: [slackChannel] }
       );
     }
 

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Autonomous agentic data engineering platform — Airflow · dbt · Snowflake · Jira · Slack · Confluence",
   "author": "Duckcode.ai",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
   "bin": {

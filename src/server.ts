@@ -18,20 +18,35 @@ const MIME_TYPES: Record<string, string> = {
   ".ico": "image/x-icon",
 };
 
+let dashboardToken: string | null = null;
+
 export function startDashboardServer(
   config: DuckpipeConfig,
   port = 9876
 ): Promise<void> {
   setApiConfig(config);
+  dashboardToken = process.env.DUCKPIPE_DASHBOARD_TOKEN ?? null;
+
+  const bindHost = dashboardToken ? "0.0.0.0" : "127.0.0.1";
 
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
+      if (req.method === "OPTIONS") {
+        setCorsHeaders(res);
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
+      if (!authenticate(req, res)) return;
+
       if (handleApiRequest(req, res)) return;
       serveStatic(req, res);
     });
 
-    server.listen(port, () => {
-      console.log(`\n  Dashboard: http://localhost:${port}\n`);
+    server.listen(port, bindHost, () => {
+      const tokenStatus = dashboardToken ? "token auth enabled" : "localhost-only, no token";
+      console.log(`\n  Dashboard: http://${bindHost}:${port} (${tokenStatus})\n`);
       resolve();
     });
 
@@ -44,6 +59,35 @@ export function startDashboardServer(
   });
 }
 
+function authenticate(req: IncomingMessage, res: ServerResponse): boolean {
+  if (!dashboardToken) return true;
+
+  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+
+  // Health endpoints bypass auth (for K8s probes)
+  if (url.pathname === "/api/health/live" || url.pathname === "/api/health/ready") {
+    return true;
+  }
+
+  const authHeader = req.headers.authorization;
+  const queryToken = url.searchParams.get("token");
+
+  if (authHeader === `Bearer ${dashboardToken}` || queryToken === dashboardToken) {
+    return true;
+  }
+
+  res.writeHead(401, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "Unauthorized — set Authorization: Bearer <token> or ?token=<token>" }));
+  return false;
+}
+
+export function setCorsHeaders(res: ServerResponse): void {
+  const allowedOrigin = dashboardToken ? "*" : "http://localhost:9876";
+  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+}
+
 function serveStatic(req: IncomingMessage, res: ServerResponse): void {
   let pathname = new URL(req.url ?? "/", "http://localhost").pathname;
   if (pathname === "/" || pathname === "") pathname = "/index.html";
@@ -51,7 +95,6 @@ function serveStatic(req: IncomingMessage, res: ServerResponse): void {
   const filePath = join(DASHBOARD_DIR, pathname);
 
   if (!existsSync(filePath)) {
-    // SPA fallback: serve index.html for any unknown path
     const indexPath = join(DASHBOARD_DIR, "index.html");
     if (existsSync(indexPath)) {
       serveFile(indexPath, ".html", res);

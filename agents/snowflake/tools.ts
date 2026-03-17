@@ -1,7 +1,11 @@
 /**
  * Snowflake agent — query monitoring, cost tracking, and optimization.
  * Uses the Snowflake SQL REST API for query execution.
+ * Supports password auth and RSA key-pair JWT auth.
  */
+
+import { createSign, createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 interface SnowflakeConfig {
   account: string;
@@ -13,6 +17,8 @@ interface SnowflakeConfig {
   database: string;
   watchedDatabases: string[];
 }
+
+let cachedJwt: { token: string; expiresAt: number } | null = null;
 
 interface ExpensiveQuery {
   queryId: string;
@@ -51,32 +57,108 @@ function getApiUrl(config: SnowflakeConfig): string {
 }
 
 function getAuthHeaders(config: SnowflakeConfig): Record<string, string> {
-  return {
+  const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json",
-    "X-Snowflake-Authorization-Token-Type": "KEYPAIR_JWT",
   };
+
+  if (config.privateKeyPath) {
+    headers["Authorization"] = `Bearer ${generateJwt(config)}`;
+    headers["X-Snowflake-Authorization-Token-Type"] = "KEYPAIR_JWT";
+  } else if (config.password) {
+    headers["Authorization"] = `Basic ${Buffer.from(`${config.user}:${config.password}`).toString("base64")}`;
+  }
+
+  return headers;
+}
+
+function generateJwt(config: SnowflakeConfig): string {
+  if (cachedJwt && cachedJwt.expiresAt > Date.now() + 60_000) {
+    return cachedJwt.token;
+  }
+
+  const privateKeyPem = readFileSync(config.privateKeyPath!, "utf-8");
+  const accountUpper = config.account.toUpperCase().replace(/\..*/, "");
+  const userUpper = config.user.toUpperCase();
+  const qualifiedUsername = `${accountUpper}.${userUpper}`;
+
+  // SHA-256 fingerprint of the public key (DER-encoded)
+  const sign = createSign("SHA256");
+  const pubKeyDer = extractPublicKeyDer(privateKeyPem);
+  const fingerprint = createHash("sha256").update(pubKeyDer).digest("base64");
+  const issuer = `${qualifiedUsername}.SHA256:${fingerprint}`;
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const expiresSeconds = nowSeconds + 3600;
+
+  const header = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const payload = base64url(JSON.stringify({
+    iss: issuer,
+    sub: qualifiedUsername,
+    iat: nowSeconds,
+    exp: expiresSeconds,
+  }));
+
+  sign.update(`${header}.${payload}`);
+  sign.end();
+  const signature = base64url(sign.sign(privateKeyPem));
+
+  const token = `${header}.${payload}.${signature}`;
+  cachedJwt = { token, expiresAt: expiresSeconds * 1000 };
+  return token;
+}
+
+function base64url(input: string | Buffer): string {
+  const b64 = Buffer.from(input).toString("base64");
+  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function extractPublicKeyDer(privatePem: string): Buffer {
+  const { createPublicKey } = require("node:crypto") as typeof import("node:crypto");
+  const pubKey = createPublicKey(privatePem);
+  return pubKey.export({ type: "spki", format: "der" }) as Buffer;
+}
+
+const SAFE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_$.]*$/;
+const SAFE_QUERY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function validateIdentifier(value: string, label: string): void {
+  if (!SAFE_IDENTIFIER.test(value)) {
+    throw new Error(`Invalid ${label}: "${value}" — only alphanumeric, underscore, dot, and dollar allowed`);
+  }
+}
+
+function validateQueryId(value: string): void {
+  if (!SAFE_QUERY_ID.test(value)) {
+    throw new Error(`Invalid query_id format: "${value}" — expected UUID`);
+  }
+}
+
+function validatePositiveInt(value: number, label: string): void {
+  if (!Number.isInteger(value) || value <= 0 || value > 10080) {
+    throw new Error(`Invalid ${label}: must be a positive integer <= 10080`);
+  }
 }
 
 function validateSelectOnly(sql: string): void {
   const normalized = sql.trim().toUpperCase();
-  if (
-    !normalized.startsWith("SELECT") &&
-    !normalized.startsWith("SHOW") &&
-    !normalized.startsWith("DESCRIBE") &&
-    !normalized.startsWith("WITH") &&
-    !normalized.includes("SYSTEM$")
-  ) {
+  const firstWord = normalized.split(/\s+/)[0];
+
+  const allowedStarts = ["SELECT", "SHOW", "DESCRIBE", "WITH"];
+  if (!allowedStarts.includes(firstWord) && !normalized.startsWith("SELECT SYSTEM$")) {
     throw new Error(
-      "Snowflake agent can only execute SELECT, SHOW, DESCRIBE, or SYSTEM$ queries"
+      "Snowflake agent can only execute SELECT, SHOW, DESCRIBE, or WITH queries"
     );
   }
 
-  const dangerous = ["INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "TRUNCATE", "MERGE"];
-  for (const kw of dangerous) {
-    if (normalized.includes(kw) && !normalized.includes(`'${kw}`)) {
-      throw new Error(`Query contains forbidden keyword: ${kw}`);
-    }
+  if (normalized.includes(";")) {
+    throw new Error("Multi-statement queries are not allowed");
+  }
+
+  const dangerousPattern = /\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|MERGE|GRANT|REVOKE|EXECUTE)\b/;
+  if (dangerousPattern.test(normalized)) {
+    const match = normalized.match(dangerousPattern);
+    throw new Error(`Query contains forbidden keyword: ${match?.[1]}`);
   }
 }
 
@@ -124,11 +206,13 @@ export async function getQueryHistory(
   config: SnowflakeConfig,
   windowMinutes = 10
 ): Promise<QueryHistoryResult> {
+  validatePositiveInt(windowMinutes, "windowMinutes");
+
   const sql = `
     SELECT query_id, query_text, user_name, warehouse_name,
            credits_used_cloud_services, total_elapsed_time/1000 as seconds
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-    WHERE start_time >= DATEADD('minute', -${windowMinutes}, CURRENT_TIMESTAMP())
+    WHERE start_time >= DATEADD('minute', -${Number(windowMinutes)}, CURRENT_TIMESTAMP())
     ORDER BY credits_used_cloud_services DESC NULLS LAST
     LIMIT 20
   `;
@@ -174,6 +258,7 @@ export async function cancelQuery(
   config: SnowflakeConfig,
   queryId: string
 ): Promise<{ cancelled: boolean; queryId: string }> {
+  validateQueryId(queryId);
   const sql = `SELECT SYSTEM$CANCEL_QUERY('${queryId}')`;
   await executeQuery(config, sql);
   return { cancelled: true, queryId };
@@ -204,6 +289,8 @@ export async function fetchSchemas(
   const schemas: TableSchema[] = [];
 
   for (const db of databases) {
+    validateIdentifier(db, "database name");
+
     const sql = `
       SELECT table_catalog, table_schema, table_name,
              column_name, data_type, is_nullable
@@ -241,6 +328,8 @@ export async function getQueryProfile(
   config: SnowflakeConfig,
   queryId: string
 ): Promise<Record<string, unknown>> {
+  validateQueryId(queryId);
+
   const sql = `
     SELECT *
     FROM TABLE(GET_QUERY_OPERATOR_STATS('${queryId}'))

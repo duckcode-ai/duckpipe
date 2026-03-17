@@ -7,12 +7,15 @@ import { FileTransport } from "./bus.js";
 import { loadPolicy } from "./policy.js";
 import { Orchestrator } from "./orchestrator.js";
 import { Scheduler } from "./scheduler.js";
-import { verifyAll } from "./verify.js";
-import type { DuckpipeConfig } from "./types.js";
+import { ensureAgentsRunning, stopAllAgents } from "./docker.js";
+import { SlackListener } from "./slack-listener.js";
+import type { DuckpipeConfig, VaultBackend } from "./types.js";
 
 export async function startDuckpipe(configPath = "./duckpipe.yaml"): Promise<{
   orchestrator: Orchestrator;
   scheduler: Scheduler;
+  config: DuckpipeConfig;
+  vault: VaultBackend;
   shutdown: () => Promise<void>;
 }> {
   const config = loadConfig(configPath);
@@ -23,7 +26,6 @@ export async function startDuckpipe(configPath = "./duckpipe.yaml"): Promise<{
     `[${timestamp()}] 🦆 DuckPipe starting — trust tier ${tier} (${tierLabel(tier)})`
   );
 
-  // Initialize subsystems
   mkdirSync("./data", { recursive: true });
 
   const vault = initVault(config.secrets.backend, tier);
@@ -32,8 +34,11 @@ export async function startDuckpipe(configPath = "./duckpipe.yaml"): Promise<{
   loadPolicy("./policy.yaml");
 
   const transport = new FileTransport("./bus");
-  const orchestrator = new Orchestrator(transport, config);
+  const orchestrator = new Orchestrator(transport, config, vault);
   orchestrator.start();
+
+  console.log(`[${timestamp()}] Starting agents...`);
+  await ensureAgentsRunning(config);
 
   const scheduler = new Scheduler();
   setupWorkflows(scheduler, orchestrator, config);
@@ -43,11 +48,31 @@ export async function startDuckpipe(configPath = "./duckpipe.yaml"): Promise<{
     console.log(`[${timestamp()}] Scheduled workflows: ${activeJobs.join(", ")}`);
   }
 
+  // Start Slack listener for @duckpipe mentions (query-sage trigger)
+  let slackListener: SlackListener | null = null;
+  if (config.integrations.slack?.enabled && config.integrations.slack.app_token) {
+    slackListener = new SlackListener(config, vault);
+    slackListener.onMessage(async (msg) => {
+      try {
+        const { runQuerySage } = await import("../workflows/query-sage.js");
+        await runQuerySage(orchestrator, config, msg);
+      } catch (err) {
+        console.error(`[${timestamp()}] query-sage error:`, err instanceof Error ? err.message : err);
+      }
+    });
+    await slackListener.start();
+  }
+
   console.log(`[${timestamp()}] 🦆 DuckPipe started — ${name}`);
 
+  let shuttingDown = false;
   const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log(`\n[${timestamp()}] Shutting down DuckPipe...`);
+    slackListener?.stop();
     scheduler.stop();
+    await stopAllAgents();
     await orchestrator.shutdown();
     console.log(`[${timestamp()}] Goodbye.`);
   };
@@ -59,7 +84,7 @@ export async function startDuckpipe(configPath = "./duckpipe.yaml"): Promise<{
     shutdown().then(() => process.exit(0));
   });
 
-  return { orchestrator, scheduler, shutdown };
+  return { orchestrator, scheduler, config, vault, shutdown };
 }
 
 function setupWorkflows(
@@ -95,6 +120,9 @@ function setupWorkflows(
         "../workflows/knowledge-scribe.js"
       );
       await runKnowledgeScribe(orchestrator, config);
+    },
+    "query-sage": async () => {
+      // query-sage is event-driven (Slack), not scheduled — registered for manual trigger
     },
   });
 }

@@ -35,22 +35,19 @@ export async function runSlaGuardian(
         dag.slaDeadline
       );
 
-      if (breachProbability > 0.7) {
-        // Step 3: Post predictive alert
-        if (config.integrations.slack?.enabled) {
-          await orchestrator.dispatchToAgent(
-            "comms",
-            "sla-guardian",
-            "slack_post_sla_warning",
-            {
-              channel: config.integrations.slack.allowed_channels[0],
-              dagId: dag.dagId,
-              breachProbability,
-              elapsedSeconds: dag.elapsedSeconds,
-              historicalP95Seconds: dag.historicalP95Seconds,
-            }
-          );
-        }
+      if (breachProbability > 0.7 && config.integrations.slack?.enabled) {
+        const channel = config.integrations.slack.allowed_channels[0];
+        const pct = Math.round(breachProbability * 100);
+        await orchestrator.executeWriteAction(
+          "comms",
+          "sla-guardian",
+          "slack_post_message",
+          {
+            channel,
+            text: `⏰ *SLA breach warning — ${dag.dagId}*\nBreach probability: ${pct}%\nElapsed: ${Math.round(dag.elapsedSeconds / 60)}m / P95: ${Math.round(dag.historicalP95Seconds / 60)}m\n_Detected by DuckPipe — duckcode.ai_`,
+          },
+          { channels: [channel] }
+        );
       }
     }
 

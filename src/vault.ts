@@ -38,17 +38,73 @@ class FileVaultBackend implements VaultBackend {
 }
 
 class HashiCorpVaultBackend implements VaultBackend {
+  private cache = new Map<string, { value: string; expiresAt: number }>();
+  private allSecrets: Map<string, string> | null = null;
+  private lastFetchMs = 0;
+  private readonly cacheTtlMs = 5 * 60 * 1000; // 5 minutes
+
   constructor(
     private vaultAddr: string,
     private vaultToken: string,
     private vaultPath: string
-  ) {}
+  ) {
+    if (!vaultAddr) throw new Error("vault_addr is required for hashicorp-vault backend");
+    if (!vaultToken) throw new Error("vault_token is required for hashicorp-vault backend");
+    if (!vaultPath) throw new Error("vault_path is required for hashicorp-vault backend");
+  }
 
   async get(key: string): Promise<string> {
-    throw new Error(
-      "HashiCorp Vault backend is not yet implemented. " +
-        "Set secrets.backend to 'env' in duckpipe.yaml for now."
-    );
+    const cached = this.cache.get(key);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.value;
+    }
+
+    await this.fetchAllSecrets();
+
+    const value = this.allSecrets?.get(key);
+    if (value === undefined) {
+      throw new Error(`Secret ${key} not found in Vault at ${this.vaultPath}`);
+    }
+    return value;
+  }
+
+  private async fetchAllSecrets(): Promise<void> {
+    if (this.allSecrets && (Date.now() - this.lastFetchMs) < this.cacheTtlMs) {
+      return;
+    }
+
+    const addr = this.vaultAddr.replace(/\/$/, "");
+    const url = `${addr}/v1/${this.vaultPath}`;
+
+    const resp = await fetch(url, {
+      headers: {
+        "X-Vault-Token": this.vaultToken,
+        Accept: "application/json",
+      },
+    });
+
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new Error(`Vault HTTP ${resp.status}: ${body}`);
+    }
+
+    const json = (await resp.json()) as {
+      data?: {
+        data?: Record<string, string>;
+        metadata?: { version: number };
+      };
+    };
+
+    // KV v2 wraps in data.data; KV v1 just has data
+    const secrets = json.data?.data ?? (json.data as Record<string, string> | undefined) ?? {};
+
+    this.allSecrets = new Map(Object.entries(secrets));
+    this.lastFetchMs = Date.now();
+
+    const now = Date.now();
+    for (const [k, v] of this.allSecrets) {
+      this.cache.set(k, { value: v, expiresAt: now + this.cacheTtlMs });
+    }
   }
 }
 

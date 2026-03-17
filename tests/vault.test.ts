@@ -79,13 +79,13 @@ describe("unsupported backends", () => {
     await expect(vault.get("any")).rejects.toThrow("not yet implemented");
   });
 
-  it("hashicorp backend throws not-implemented", async () => {
+  it("hashicorp backend throws on connection error", async () => {
     const vault = createVault("hashicorp-vault", {
-      vault_addr: "http://localhost:8200",
+      vault_addr: "http://localhost:9999",
       vault_token: "fake",
       vault_path: "secret/data/test",
     });
-    await expect(vault.get("any")).rejects.toThrow("not yet implemented");
+    await expect(vault.get("any")).rejects.toThrow();
   });
 
   it("aws backend throws not-implemented", async () => {

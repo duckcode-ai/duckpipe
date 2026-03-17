@@ -6,6 +6,7 @@ import type {
   PolicyDecision,
   Transport,
   TrustTier,
+  VaultBackend,
   WorkflowName,
   WorkflowResult,
   WorkflowStatus,
@@ -14,6 +15,7 @@ import { logAction, updateActionOutput } from "./audit.js";
 import { checkPolicy } from "./policy.js";
 import { getStateDb, generateDedupKey, isDuplicate, markSeen } from "./db.js";
 import { createBusMessage } from "./bus.js";
+import { ApprovalManager, type ApprovalResult } from "./approval.js";
 
 interface WorkflowRun {
   id: string;
@@ -26,12 +28,23 @@ interface WorkflowRun {
 export class Orchestrator {
   private transport: Transport;
   private config: DuckpipeConfig;
+  private vault: VaultBackend | null;
+  private approvalManager: ApprovalManager | null = null;
   private activeRuns: Map<string, WorkflowRun> = new Map();
   private messageHandlers: Map<string, (msg: BusMessage) => void> = new Map();
 
-  constructor(transport: Transport, config: DuckpipeConfig) {
+  constructor(transport: Transport, config: DuckpipeConfig, vault?: VaultBackend) {
     this.transport = transport;
     this.config = config;
+    this.vault = vault ?? null;
+
+    if (config.duckpipe.trust_tier >= 2 && config.integrations.slack?.enabled && vault) {
+      try {
+        this.approvalManager = new ApprovalManager(config, vault);
+      } catch {
+        console.warn("⚠  ApprovalManager not initialized — Slack approval disabled");
+      }
+    }
   }
 
   start(): void {
@@ -121,8 +134,32 @@ export class Orchestrator {
     }
 
     if (decision.approvalRequired) {
-      // In a full implementation, this would post to Slack and wait for approval
-      return { decision };
+      if (!this.approvalManager) {
+        const reason = "Approval required but Slack approval is not configured";
+        updateActionOutput(auditId, "{}", 0, false, reason);
+        return { decision: { allowed: false, reason, approvalRequired: true } };
+      }
+
+      const approvalResult = await this.approvalManager.requestApproval({
+        description: `${agent}/${action}`,
+        preview: JSON.stringify(payload).slice(0, 200),
+        workflow,
+        agent,
+        action,
+        tier: this.tier,
+      });
+
+      if (!approvalResult.approved) {
+        const reason = approvalResult.timedOut
+          ? "Approval timed out"
+          : `Rejected by ${approvalResult.approvedBy}`;
+        updateActionOutput(auditId, JSON.stringify(approvalResult), 0, false, reason);
+        return {
+          decision: { allowed: false, reason, approvalRequired: true },
+        };
+      }
+
+      // Approved — continue to execute below
     }
 
     const msg = createBusMessage("orchestrator", agent, workflow, "task", {

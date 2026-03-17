@@ -5,9 +5,11 @@ WORKDIR /app
 COPY package.json tsconfig.json ./
 RUN npm ci --omit=dev
 
+COPY agents/runtime.ts ./agents/
 COPY agents/snowflake/ ./agents/snowflake/
-COPY src/ ./src/
+COPY src/types.ts ./src/
 
 RUN npx tsc
 
-CMD ["node", "dist/agents/snowflake/tools.js"]
+ENV DUCKPIPE_BUS_DIR=/app/bus
+CMD ["node", "dist/agents/snowflake/index.js"]

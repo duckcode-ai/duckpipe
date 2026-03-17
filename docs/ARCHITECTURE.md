@@ -1,36 +1,120 @@
 # DuckPipe Architecture
 
-This document describes the DuckPipe architecture for engineers integrating or extending the platform.
+This document describes the complete DuckPipe architecture for engineers integrating, extending, or evaluating the platform for enterprise deployment.
+
+---
 
 ## Overview
 
-DuckPipe is an orchestrator that runs specialized AI agents in isolated containers. The orchestrator coordinates workflows, routes events, enforces policy, and manages the message bus. Agents never talk to each other directly; all communication flows through the orchestrator.
+DuckPipe is an orchestrator that runs specialized AI agents in isolated Docker containers. The orchestrator coordinates workflows, routes events, enforces trust-tier policy, and manages the filesystem message bus. Agents never communicate directly with each other; all interaction flows through the orchestrator.
 
-## Orchestrator Pattern
+```
+┌──────────────────────────────────────────────────────────┐
+│                     Host / K8s Pod                        │
+│                                                           │
+│  ┌─────────────────────────────────────────────────────┐ │
+│  │              Orchestrator (main process)              │ │
+│  │                                                       │ │
+│  │  ┌─────────┐ ┌────────┐ ┌────────┐ ┌─────────────┐ │ │
+│  │  │ Vault   │ │ Policy │ │ Audit  │ │  Scheduler  │ │ │
+│  │  │ Module  │ │ Engine │ │ System │ │  (croner)   │ │ │
+│  │  └─────────┘ └────────┘ └────────┘ └─────────────┘ │ │
+│  │  ┌──────────┐ ┌────────┐ ┌─────────┐ ┌──────────┐ │ │
+│  │  │  Router  │ │  Bus   │ │ Docker  │ │ Dashboard│ │ │
+│  │  │          │ │(IPC mgr)│ │ Manager │ │  Server  │ │ │
+│  │  └──────────┘ └────────┘ └─────────┘ └──────────┘ │ │
+│  └─────────────────────────┬───────────────────────────┘ │
+│                            │ Filesystem IPC               │
+│       ┌────────────┬───────┴──────┬────────────┐         │
+│       ▼            ▼              ▼            ▼         │
+│  ┌─────────┐  ┌─────────┐  ┌──────────┐  ┌─────────┐   │
+│  │ Airflow │  │   dbt   │  │Snowflake │  │  Comms  │   │
+│  │ Agent   │  │  Agent  │  │  Agent   │  │  Agent  │   │
+│  │(Docker) │  │(Docker) │  │ (Docker) │  │(Docker) │   │
+│  └────┬────┘  └────┬────┘  └────┬─────┘  └────┬────┘   │
+│       │            │            │             │          │
+└───────┼────────────┼────────────┼─────────────┼──────────┘
+        │            │            │             │
+        ▼            ▼            ▼             ▼
+   Airflow API   dbt Cloud    Snowflake    Slack/Jira/
+                 GitHub       (HTTPS)      Confluence
+```
 
-The orchestrator (`src/orchestrator.ts`) is the central process. It:
+---
 
-1. Subscribes to the bus for messages from agents
-2. Dispatches tasks to agents via the bus
-3. Checks policy before every write action
-4. Logs every action to the audit system before execution
-5. Manages workflow lifecycle (start, complete, fail)
-6. Handles deduplication to avoid duplicate workflow runs
+## Core Components
 
-The orchestrator does not run inside a container. It runs as the main process and spawns/manages agent containers. It holds the vault reference and config; agents receive only the credentials they need via the bus payload (in memory, never persisted).
+### Orchestrator (`src/orchestrator.ts`)
 
-## Filesystem IPC Bus
+The central coordinator. Responsibilities:
 
-DuckPipe uses filesystem-based inter-process communication. No Redis, RabbitMQ, or Kafka.
+1. **Agent lifecycle**: Starts and stops agent containers via Docker Manager
+2. **Message routing**: Dispatches tasks to agents via the bus, receives results
+3. **Policy enforcement**: Calls the policy engine before every write action
+4. **Audit logging**: Writes to the audit system before every action executes
+5. **Workflow management**: Tracks workflow state (start, complete, fail)
+6. **Event deduplication**: Prevents duplicate workflow runs for the same event
+7. **Approval coordination**: For Tier 2, routes write actions through the Slack approval flow
 
-### Directory Layout
+The orchestrator does not run inside a container. It runs as the main Node.js process and manages everything else.
+
+### Vault (`src/vault.ts`)
+
+Resolves credentials from configured backends. The vault exposes a read-only interface:
+
+```typescript
+interface VaultBackend {
+  get(key: string): Promise<string>;
+}
+```
+
+No `set()`, no `delete()`. DuckPipe consumes secrets; it never manages them.
+
+**Backends:**
+| Backend | Description |
+|---|---|
+| `env` | Reads from `process.env`. Development default. Warns at Tier 2+. |
+| `file` | Age-encrypted file, decrypted into memory at startup. |
+| `hashicorp-vault` | KV v2 API with in-memory caching (5-min TTL). |
+| `aws-secrets-manager` | AWS SDK with instance role or explicit credentials. |
+
+### Policy Engine (`src/policy.ts`)
+
+Consulted before every write action. Returns:
+
+```typescript
+{ allowed: boolean, reason: string, approvalRequired: boolean }
+```
+
+| Tier | Behavior |
+|---|---|
+| 1 | All writes blocked. `allowed: false` always. |
+| 2 | Writes require Slack approval. `approvalRequired: true`. |
+| 3 | If action matches a rule in `policy.yaml`: `allowed: true`. Otherwise: falls back to Tier 2. |
+
+Policy is loaded at startup and cached. Changes require a restart. This is intentional — policy changes should be deliberate.
+
+### Audit System (`src/audit.ts`)
+
+Append-only SQLite log with immutability enforced by triggers:
+
+- `logAction()` writes an entry **before** the action executes
+- If the write fails, the action does not run
+- No `updateAction()`, `deleteAction()`, or `clearAudit()` functions exist
+- SQLite triggers prevent UPDATE and DELETE at the database engine level
+
+Exports available in JSON and CSV for SIEM integration.
+
+### Filesystem IPC Bus (`src/bus.ts`)
+
+Inter-process communication using JSON files on the local filesystem. No Redis, no RabbitMQ, no Kafka.
 
 ```
 bus/
-  orchestrator/          <- agents write results here (orchestrator reads)
+  orchestrator/              ← agents write results here
   agents/
-    airflow/in/          <- orchestrator writes tasks here
-    airflow/out/          <- airflow agent writes results here
+    airflow/in/              ← orchestrator writes tasks here
+    airflow/out/             ← airflow agent writes results here
     dbt/in/
     dbt/out/
     snowflake/in/
@@ -39,108 +123,246 @@ bus/
     comms/out/
 ```
 
-### Message Flow
-
-1. Orchestrator creates a `BusMessage` (JSON) and writes it to `bus/agents/<agent>/in/<timestamp>-<uuid>.json`
-2. Agent polls its `in/` directory every 200ms, reads the file, processes it, deletes the file
+**Message flow:**
+1. Orchestrator writes a JSON task to `bus/agents/<agent>/in/<timestamp>-<uuid>.json`
+2. Agent polls `in/` every 200ms, reads the file, processes it, deletes the input file
 3. Agent writes the response to `bus/agents/<agent>/out/<timestamp>-<uuid>.json`
-4. Orchestrator watches all `out/` directories via chokidar, reads the file, processes it, deletes the file
-5. Orchestrator routes the response to the correct workflow handler via `_requestId` or `_replyTo` in the payload
+4. Orchestrator watches all `out/` directories via chokidar, reads the file, routes the response
+5. Files are deleted after processing — the bus is transient state
 
-Messages are JSON files. Files are deleted after processing. The bus directory is transient; add `bus/` to `.gitignore`.
+The bus is implemented as a `Transport` interface, allowing in-memory mocks for testing and potential future transport backends (message queues, etc.) for distributed deployments.
 
-## Agent Containers
+### Scheduler (`src/scheduler.ts`)
 
-Each agent runs in its own Docker container (or process, configurable). Agents:
+Triggers workflows on cron or interval schedules using the `croner` library:
 
-- Receive tasks via their `in/` directory
-- Execute MCP tools (Airflow API, Snowflake, dbt Cloud, Slack, etc.)
-- Write results to their `out/` directory
-- Cannot reach other agents over the network
-- Receive only the credentials they need (passed in the task payload, never stored)
+| Workflow | Default Schedule |
+|---|---|
+| Incident Autopilot | Every 120 seconds |
+| Pipeline Whisperer | Every 15 minutes |
+| Cost Sentinel | Every 10 minutes |
+| SLA Guardian | Every 5 minutes (business hours) |
+| Knowledge Scribe | Nightly at 2am |
+| Query Sage | Event-driven (Slack @mention) |
 
-Agent images are minimal (e.g. `node:20-slim`). No extra network access beyond what the MCP tools require.
+The scheduler invokes workflow handlers. It does not dispatch directly to agents; workflow logic handles agent coordination through the orchestrator.
 
-## Policy Engine
+### Router (`src/router.ts`)
 
-The policy engine (`src/policy.ts`) is consulted before every write action. It:
+Routes incoming events (webhooks, Slack messages, scheduled triggers) to the correct workflow handler. The router normalizes event formats and prevents duplicate processing.
 
-- Blocks all writes when `trust_tier: 1`
-- Requires Slack approval for writes when `trust_tier: 2` (or Tier 3 with no matching rule)
-- Allows immediate execution when `trust_tier: 3` and the action matches a rule in `policy.yaml`
+### Docker Manager (`src/docker.ts`)
 
-Policy is loaded at startup and cached. Changes require a restart. See `docs/TRUST-TIERS.md`.
+Manages agent container lifecycle:
 
-## Scheduler
+- Detects runtime: Docker, Podman, or process (fallback)
+- Starts containers with resource limits (memory, CPU, timeout)
+- Monitors container health
+- Stops containers on shutdown
+- Falls back to child processes when containers are unavailable
 
-The scheduler (`src/scheduler.ts`) triggers workflows on a cron or interval basis. It uses the `croner` library. Workflows like incident-autopilot poll every N seconds; knowledge-scribe runs nightly at 2am.
+### Dashboard Server (`src/server.ts`, `src/api.ts`)
 
-The scheduler invokes workflow handlers registered by the main process. It does not dispatch directly to agents; the workflow logic does that via the orchestrator.
+Embedded HTTP server providing:
 
-## Data Flow Diagram
+- REST API for audit log, workflow status, agent health, approvals
+- Server-Sent Events (SSE) for real-time dashboard updates
+- Health endpoints (`/api/health/live`, `/api/health/ready`) for Kubernetes probes
+- Bearer token authentication when exposed beyond localhost
+- Setup wizard for first-run onboarding
+
+### Slack Listener (`src/slack-listener.ts`)
+
+Connects to Slack via Socket Mode (WebSocket) for real-time event handling:
+
+- Listens for `@duckpipe` mentions in allowed channels
+- Filters by configured trigger keyword and channel allowlist
+- Dispatches messages to the query-sage workflow
+- Handles approval reactions (✅/❌) for Tier 2 write actions
+
+---
+
+## Agent Architecture
+
+### Agent Runtime (`agents/runtime.ts`)
+
+A generic runtime that all agents share:
+
+1. Poll `bus/agents/<name>/in/` for task JSON files
+2. Match task `_taskType` to registered tool function
+3. Execute the tool function with task parameters
+4. Write result to `bus/agents/<name>/out/`
+5. Delete the input file
+
+Each agent entry point (`agents/<name>/index.ts`) imports the runtime and registers its tool functions.
+
+### Agent Tool Contracts
+
+Each agent defines typed tools in `tools.ts` with structured output contracts:
+
+**Airflow Agent** — monitors DAGs, detects failures, analyzes task logs
+**dbt Agent** — monitors jobs, detects schema drift, proposes model fixes
+**Snowflake Agent** — monitors query costs, detects anomalies, suggests optimizations
+**Comms Agent** — posts Slack messages, creates Jira tickets, updates Confluence pages
+
+All tools that perform write actions are marked `[WRITE]` and require policy approval before execution.
+
+---
+
+## Workflow Architecture
+
+Workflows orchestrate multi-agent collaboration:
 
 ```
-                    +------------------+
-                    |   Scheduler      |
-                    |   (cron/interval)|
-                    +--------+---------+
-                             |
-                             v
-+----------+    events     +------------------+    tasks     +----------------+
-| Webhooks |-------------->|   Orchestrator   |------------->| Agent (airflow)|
-| (future) |               |                  |             |   in/  out/     |
-+----------+               |  - policy check   |<-------------+----------------+
-                           |  - audit log     |    results
-                           |  - dedup        |             +----------------+
-                           |  - routing      |------------->| Agent (dbt)    |
-                           +--------+--------+             |   in/  out/     |
-                                    |                     +----------------+
-                                    |                     +----------------+
-                                    +--------------------->| Agent (snowflake)|
-                                                          |   in/  out/     |
-                                                          +----------------+
-                                                          +----------------+
-                                    +--------------------->| Agent (comms)  |
-                                    |                     |   in/  out/     |
-                                    |                     +----------------+
-                                    |
-                                    v
-                           +------------------+
-                           |  Audit Log       |
-                           |  (SQLite)        |
-                           +------------------+
+Event/Trigger
+    │
+    ▼
+┌────────────────┐
+│   Workflow      │
+│   Handler       │
+└───────┬────────┘
+        │
+        ├──▶ Agent 1 (parallel)  ──▶ Result 1 ─┐
+        ├──▶ Agent 2 (parallel)  ──▶ Result 2 ─┤
+        │                                       │
+        ◀───────── Aggregate Results ───────────┘
+        │
+        ├──▶ Policy Check (for writes)
+        ├──▶ Approval (Tier 2)
+        ├──▶ Comms Agent (Slack/Jira/Confluence)
+        │
+        ▼
+   Audit Log Entry
 ```
 
-## Transport Interface Abstraction
+### Workflow Inventory
 
-The bus is implemented as a `Transport` interface (`src/types.ts`):
+| Workflow | Trigger | Agents Used | Write Actions |
+|---|---|---|---|
+| Incident Autopilot | Poll / webhook | airflow, dbt, snowflake, comms | Jira ticket, Slack alert, task retry |
+| Pipeline Whisperer | 15-min interval | snowflake, dbt, comms | GitHub PR, Slack notification |
+| Cost Sentinel | 10-min interval | snowflake, comms | Query cancel, Slack alert |
+| SLA Guardian | 5-min interval | airflow, comms | Slack warning |
+| Knowledge Scribe | Nightly cron | dbt, comms | Confluence pages |
+| Query Sage | Slack @mention | snowflake, comms | Slack reply, optional PR |
+
+---
+
+## Deployment Architecture
+
+### Local / Single Machine
+
+```bash
+npx duckpipe start
+```
+
+The orchestrator runs as a single Node.js process. Agents run as Docker containers (or child processes). SQLite stores the audit log and state. Dashboard available at `http://localhost:9876`.
+
+### Docker Compose
+
+```bash
+docker compose -f config-examples/docker-compose.yaml up -d
+```
+
+All components run in containers. Volumes mount for bus IPC and SQLite persistence.
+
+### Kubernetes
+
+Manifests in `config-examples/k8s/`:
+
+| Manifest | Purpose |
+|---|---|
+| `namespace.yaml` | Dedicated `duckpipe` namespace |
+| `secret.yaml` | Kubernetes secrets for credentials |
+| `deployment.yaml` | Orchestrator deployment with resource limits |
+| `rbac.yaml` | Service account and role bindings |
+
+Health probes:
+- Liveness: `GET /api/health/live` (returns 200 if process is running)
+- Readiness: `GET /api/health/ready` (returns 200 if all configured integrations are connected)
+
+---
+
+## Data Storage
+
+### SQLite Database (`data/duckpipe.db`)
+
+| Table | Purpose | Mutable |
+|---|---|---|
+| `audit_log` | Append-only action log | No (triggers prevent UPDATE/DELETE) |
+| `workflow_runs` | Workflow execution history | Yes (status updates) |
+| `dedup` | Event deduplication cache | Yes (TTL-based cleanup) |
+| `schema_snapshots` | Last-known Snowflake schema state | Yes (updated on drift check) |
+| `run_history` | Historical DAG run times for SLA prediction | Yes (append + aggregate) |
+| `confluence_pages` | Page ID cache for knowledge-scribe | Yes (updated on sync) |
+
+SQLite is configured with WAL (Write-Ahead Logging) mode for concurrent read performance.
+
+### Bus Directory (`bus/`)
+
+Transient. Created fresh on startup. Contains only in-flight messages. Added to `.gitignore`. No persistent data.
+
+---
+
+## Module Reference
+
+| Module | File | Purpose |
+|---|---|---|
+| Entry point | `src/index.ts` | Init vault → orchestrator → scheduler → listeners → dashboard |
+| CLI | `src/cli.ts` | Command parser: start, verify, setup, audit, dashboard |
+| Orchestrator | `src/orchestrator.ts` | Agent lifecycle, bus routing, policy check, approval flow |
+| Bus | `src/bus.ts` | FileTransport implementation, message creation |
+| Policy | `src/policy.ts` | Tier enforcement, policy.yaml parsing, rule matching |
+| Audit | `src/audit.ts` | Append-only log, export to JSON/CSV |
+| Vault | `src/vault.ts` | Credential resolution (env, file, hashicorp, aws) |
+| Scheduler | `src/scheduler.ts` | Cron/interval triggers for workflows |
+| Router | `src/router.ts` | Routes events to correct workflow |
+| Database | `src/db.ts` | SQLite state (workflow runs, dedup, schema snapshots) |
+| Verify | `src/verify.ts` | Connection and permission checker |
+| Docker | `src/docker.ts` | Agent container lifecycle management |
+| Server | `src/server.ts` | Dashboard HTTP server, auth, SSE |
+| API | `src/api.ts` | REST endpoints, health checks, CORS |
+| Slack | `src/slack-listener.ts` | Socket Mode listener for @duckpipe |
+| Approval | `src/approval.ts` | Slack-based approval flow for Tier 2 |
+
+---
+
+## Extension Points
+
+### Adding a New Integration (Skill Model)
+
+New integrations are contributed as skills in `.duck/skills/`:
+
+1. Create `agents/<name>/` with AGENT.md, Dockerfile, tools.ts
+2. Add `integrations/<name>.mcp.json` with tool definitions
+3. Add config section to `DuckpipeConfigSchema` in `src/types.ts`
+4. Wire the agent into the orchestrator
+5. Add verifier in `src/verify.ts`
+6. Add connection docs in `docs/CONNECTING-<NAME>.md`
+
+See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full guide.
+
+### Adding a New Workflow
+
+1. Create `workflows/<name>.ts` implementing the `WorkflowResult` return type
+2. Register in the scheduler with trigger schedule
+3. Add config section in `duckpipe.yaml`
+4. Add tests in `tests/workflows/<name>.test.ts`
+
+### Custom Transport Backend
+
+Implement the `Transport` interface in `src/types.ts`:
 
 ```typescript
 interface Transport {
   send(agent: AgentName | "orchestrator", message: BusMessage): Promise<void>;
-  subscribe(
-    agent: AgentName | "orchestrator",
-    handler: (msg: BusMessage) => void
-  ): void;
+  subscribe(agent: AgentName | "orchestrator", handler: (msg: BusMessage) => void): void;
   shutdown(): Promise<void>;
 }
 ```
 
-The default implementation is `FileTransport` in `src/bus.ts`, which uses the filesystem layout described above. The abstraction allows swapping to a different transport (e.g. in-memory for tests, or a message queue for distributed deployment) without changing the orchestrator or workflows.
+The default `FileTransport` can be swapped for a message queue (Redis, RabbitMQ) for distributed deployments without changing orchestrator or workflow code.
 
-Tests use `MockTransport` (`tests/mocks/mock-transport.ts`) to avoid filesystem I/O.
+---
 
-## Key Modules
-
-| Module    | Purpose                                              |
-|-----------|------------------------------------------------------|
-| `index.ts`| Entry point: init vault, load config, start orchestrator and scheduler |
-| `orchestrator.ts` | Agent lifecycle, bus routing, policy check, audit |
-| `bus.ts`  | FileTransport implementation, message creation       |
-| `policy.ts` | Tier enforcement, policy.yaml parsing, rule matching |
-| `audit.ts`| Append-only audit log, export to JSON/CSV             |
-| `vault.ts`| Credential resolution (env, file, hashicorp, aws)    |
-| `scheduler.ts` | Cron/interval triggers for workflows              |
-| `router.ts` | Routes incoming events to correct workflow          |
-| `db.ts`   | SQLite state (workflow runs, dedup, schema snapshots)  |
-| `verify.ts` | Connection and permission checker for integrations |
+*Copyright 2026 Duckcode.ai · Licensed under Apache 2.0*

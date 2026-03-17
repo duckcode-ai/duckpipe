@@ -1,109 +1,164 @@
-# Connecting DuckPipe to Airflow
+# Connecting DuckPipe to Apache Airflow
 
-Step-by-step guide to connect DuckPipe to your Apache Airflow instance.
+Step-by-step guide to connect DuckPipe to your Apache Airflow instance. Covers managed services (Cloud Composer, MWAA, Astronomer) and self-hosted deployments.
 
-## 1. Find the API Endpoint
+---
 
-DuckPipe uses the Airflow REST API. The base URL format is typically `https://<host>/api/v1` or just `https://<host>` if the API is at the root.
+## Prerequisites
+
+- DuckPipe installed (`npm install` completed)
+- Network access from DuckPipe host to your Airflow REST API endpoint
+- An Airflow user account with appropriate role (Viewer for Tier 1, Op for Tier 2)
+
+---
+
+## 1. Find Your API Endpoint
+
+DuckPipe connects to the Airflow REST API (v1). The base URL depends on your deployment platform.
 
 ### Google Cloud Composer
 
-- In the Cloud Console, open your Composer environment
-- Note the "Airflow URI" (e.g. `https://xxxxx-dot-us-central1.composer.googleusercontent.com`)
-- The REST API is enabled by default at the same host
+1. Open the Cloud Console → Composer → Environments
+2. Note the **Airflow webserver URL** (e.g. `https://xxxxx-dot-us-central1.composer.googleusercontent.com`)
+3. The REST API is enabled by default at the same host
+4. Authentication: Use a service account with the `Composer User` IAM role, or configure the Airflow `basic_auth` backend
 
 ### AWS MWAA (Managed Workflows for Apache Airflow)
 
-- In the MWAA console, open your environment
-- Note the "Airflow UI" URL (e.g. `https://xxxxx.vpce-xxx.us-east-1.airflow.amazonaws.com`)
-- The REST API is at the same host; ensure the VPC endpoint allows access from where DuckPipe runs
+1. Open the MWAA Console → Environments
+2. Note the **Airflow UI URL** (e.g. `https://xxxxx.vpce-xxx.us-east-1.airflow.amazonaws.com`)
+3. The REST API is at the same host
+4. Ensure the VPC endpoint allows access from where DuckPipe runs
+5. Authentication: MWAA uses AWS IAM for API access. Generate a web login token using the AWS CLI:
 
-### Astronomer
+```bash
+aws mwaa create-web-login-token --name your-environment-name
+```
 
-- In the Astronomer UI, open your deployment
-- The Airflow URL is shown (e.g. `https://your-deployment.astronomer.run`)
-- The REST API is at the same host
+### Astronomer (Astro)
+
+1. Open the Astronomer Cloud UI → Deployments
+2. Note the deployment URL (e.g. `https://your-deployment.astronomer.run`)
+3. The REST API is at the same host
+4. Authentication: Create an API key in the Astronomer UI or use Deployment API keys
 
 ### Self-Hosted Airflow
 
-- Use your Airflow host (e.g. `https://airflow.internal.company.com`)
-- Ensure the REST API is enabled. In `airflow.cfg`, verify:
-  - `[api] auth_backends` includes the auth method you use
-  - The webserver is running and accessible
+1. Use your Airflow webserver URL (e.g. `https://airflow.internal.company.com`)
+2. Ensure the REST API is enabled in `airflow.cfg`:
 
-If the REST API is disabled, enable it in your Airflow configuration and restart the webserver.
+```ini
+[api]
+auth_backends = airflow.api.auth.backend.basic_auth
+```
 
-## 2. Create the Viewer Role (Tier 1)
+3. Restart the webserver after configuration changes
+4. If behind a reverse proxy, ensure the proxy forwards to the correct port (default: 8080)
 
-For read-only access, use the `Viewer` role. Airflow 2.x includes this role by default.
+---
 
-If you need a custom role with minimal permissions:
+## 2. Create the DuckPipe User and Role
 
-1. In Airflow UI: Admin -> Roles
-2. Create a role (e.g. `duckpipe_viewer`) with permissions:
+### Tier 1 (Read-Only) — Viewer Role
+
+For read-only monitoring, the built-in `Viewer` role is sufficient. Create a dedicated service user:
+
+1. In the Airflow UI: **Admin → Users → + Add**
+2. Username: `duckpipe`
+3. Role: `Viewer`
+4. Set a strong, unique password
+5. Save
+
+If you need a custom role with minimum permissions:
+
+1. **Admin → Roles → + Add**
+2. Name: `duckpipe_viewer`
+3. Add permissions:
    - `can read on DAGs`
    - `can read on DAG Runs`
    - `can read on Task Instances`
    - `can read on Task Logs`
+4. Assign this role to the `duckpipe` user
 
-For Tier 2, you will need the `Op` role or equivalent (trigger DAG runs, clear tasks).
+### Tier 2 (Supervised Writes) — Op Role
 
-## 3. Generate an API Key or Use Username/Password
+For triggering retries and clearing failed tasks:
 
-### Username and Password
+1. Change the user role to `Op`, or create a custom role with:
+   - All Tier 1 permissions, plus:
+   - `can create on DAG Runs` (trigger new runs)
+   - `can delete on Task Instances` (clear for retry)
+2. Optional: Use `allowed_dags` in `duckpipe.yaml` to scope access to specific DAGs
 
-Create a dedicated user for DuckPipe:
+---
 
-1. Admin -> Users -> Add user
-2. Username: e.g. `duckpipe`
-3. Role: `Viewer` (Tier 1) or `Op` (Tier 2)
-4. Set a strong password
+## 3. Generate Credentials
 
-### API Key (Airflow 2.2+)
+### Option A: Username and Password (Basic Auth)
 
-1. Log in as the DuckPipe user
-2. Click your username (top right) -> Security -> API Keys
+Use the username and password created in Step 2. This is the simplest method and works with all Airflow deployments.
+
+### Option B: API Key (Airflow 2.2+)
+
+1. Log in as the `duckpipe` user
+2. Click your username (top right) → **Security → API Keys**
 3. Create a new key
-4. Store the key securely; it is shown only once
+4. Copy the key immediately — it is shown only once
+5. Use the API key as the password with the username for Basic Auth
 
-Note: DuckPipe's verify and integration currently use Basic auth (username:password). If using API keys, you may need to pass the key as the password with username, or check the integration implementation for API key support.
+---
 
 ## 4. Test the Connection Manually
 
+Before configuring DuckPipe, verify the connection works:
+
 ```bash
-# Replace with your values
 export AIRFLOW_URL="https://your-airflow.example.com"
 export AIRFLOW_USER="duckpipe"
-export AIRFLOW_PASS="your-password"
+export AIRFLOW_PASS="your-password-or-api-key"
 
 # Health check
-curl -u "$AIRFLOW_USER:$AIRFLOW_PASS" "$AIRFLOW_URL/api/v1/health"
+curl -s -u "$AIRFLOW_USER:$AIRFLOW_PASS" "$AIRFLOW_URL/api/v1/health" | python3 -m json.tool
 
-# List DAGs (limit 1)
-curl -u "$AIRFLOW_USER:$AIRFLOW_PASS" "$AIRFLOW_URL/api/v1/dags?limit=1"
+# List DAGs (limit 3)
+curl -s -u "$AIRFLOW_USER:$AIRFLOW_PASS" "$AIRFLOW_URL/api/v1/dags?limit=3" | python3 -m json.tool
 ```
 
-A successful response returns JSON. If you get 401 or 403, check credentials and role.
+**Expected**: JSON response with DAG list. If you get 401 or 403, check credentials and role.
 
-## 5. Add to .env
+---
+
+## 5. Configure DuckPipe
+
+### Environment Variables (`.env`)
 
 ```bash
 AIRFLOW_BASE_URL=https://your-airflow.example.com
 AIRFLOW_USERNAME=duckpipe
-AIRFLOW_PASSWORD=your-password
+AIRFLOW_PASSWORD=your-password-or-api-key
 ```
 
-Or use `${VAR}` references if your secrets are in a vault:
+### Configuration (`duckpipe.yaml`)
 
 ```yaml
-# duckpipe.yaml
 integrations:
   airflow:
     enabled: true
     base_url: "${AIRFLOW_BASE_URL}"
     username: "${AIRFLOW_USERNAME}"
     password: "${AIRFLOW_PASSWORD}"
+    allowed_dags: []               # empty = all DAGs; list specific DAG IDs to scope access
+    verify_ssl: true               # set false only for self-signed certs in development
 ```
+
+### Production Recommendations
+
+- Store credentials in HashiCorp Vault or AWS Secrets Manager instead of `.env`
+- Use API keys instead of passwords when available
+- Set `allowed_dags` to scope access to only the DAGs DuckPipe should monitor
+- Keep `verify_ssl: true` in production — add your CA cert to the trust store if needed
+
+---
 
 ## 6. Run Verify
 
@@ -111,51 +166,76 @@ integrations:
 npx duckpipe verify
 ```
 
-Or for Airflow only:
+Or verify only the Airflow integration:
 
 ```bash
 npx duckpipe verify --integration airflow
 ```
 
-Expected output:
+### Expected Output (Tier 1)
 
 ```
 DuckPipe connection verify — checking your integrations...
 
-Airflow connected (version 2.x.x)
-  Permissions: GET /dags [ok]  GET /dagRuns [ok]  POST /dagRuns [no] (Tier 1 read-only)
-  DAGs visible: N
+✓ Airflow connected (version 2.8.1)
+  Permissions: GET /dags ✓  GET /dagRuns ✓  POST /dagRuns ✗ (Tier 1 read-only)
+  DAGs visible: 47
 ```
 
-## 7. Common Errors
+### Expected Output (Tier 2)
+
+```
+✓ Airflow connected (version 2.8.1)
+  Permissions: GET /dags ✓  GET /dagRuns ✓  POST /dagRuns ✓
+  DAGs visible: 47
+```
+
+---
+
+## 7. Troubleshooting
 
 ### 401 Unauthorized
 
 - Wrong username or password
-- API key not configured correctly
-- User does not exist or is disabled
+- API key not configured correctly or expired
+- User account is disabled in Airflow
+- **Fix**: Verify credentials with the `curl` test in Step 4
 
 ### 403 Forbidden
 
 - User role lacks required permissions
-- For Tier 1, ensure Viewer role. For Tier 2, ensure Op role
+- For Tier 1: ensure `Viewer` role
+- For Tier 2: ensure `Op` role
+- **Fix**: Check Admin → Users → (user) → Roles in Airflow UI
 
-### Connection refused / ECONNREFUSED
+### Connection Refused / ECONNREFUSED
 
 - Airflow host unreachable from DuckPipe's network
-- Wrong port (default 443 for HTTPS, 80 for HTTP)
-- Firewall or security group blocking the connection
+- Wrong port (default: 443 for HTTPS, 8080 for local Airflow)
+- Firewall, security group, or VPC configuration blocking the connection
+- **Fix**: Test with `curl` or `telnet <host> <port>` from the DuckPipe host
 
-### SSL certificate errors
+### SSL Certificate Errors
 
-- Self-signed certificate: set `verify_ssl: false` in `duckpipe.yaml` for the Airflow integration (only for internal/development)
-- For production, use a valid certificate or add the CA to your trust store
+- Self-signed certificate in development
+- **Fix**: Set `verify_ssl: false` for development only. For production, add your CA certificate to the Node.js trust store:
 
-### CORS errors
+```bash
+export NODE_EXTRA_CA_CERTS=/path/to/your/ca-cert.pem
+```
 
-- Usually from browser; DuckPipe uses server-side fetch. If you see CORS in logs, the issue may be a redirect or wrong URL
+### Empty DAG List
 
-### Empty DAG list
+- User has no DAG-level access
+- DAGs are paused and filtered (check your Airflow configuration)
+- **Fix**: Log into Airflow UI as the DuckPipe user and verify DAGs are visible
 
-- User has no access to any DAGs
-- Check role permissions and DAG-level access if applicable
+### Timeout on Large Installations
+
+- If you have 500+ DAGs, the initial verify may take longer
+- Airflow API pagination limits may apply
+- **Fix**: This is normal for large installations. DuckPipe handles pagination automatically.
+
+---
+
+*Copyright 2026 Duckcode.ai · Licensed under Apache 2.0*

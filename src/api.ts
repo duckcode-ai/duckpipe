@@ -1,14 +1,24 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { EventEmitter } from "node:events";
 import { getStateDb, getAuditDb } from "./db.js";
 import { queryAudit, exportAuditJSON, exportAuditCSV } from "./audit.js";
+import { getRunningAgents, isAgentRunning } from "./docker.js";
+import { setCorsHeaders } from "./server.js";
 import type { DuckpipeConfig } from "./types.js";
 
 let config: DuckpipeConfig | null = null;
 let startTime = Date.now();
 
+export const apiEvents = new EventEmitter();
+apiEvents.setMaxListeners(100);
+
 export function setApiConfig(cfg: DuckpipeConfig): void {
   config = cfg;
   startTime = Date.now();
+}
+
+export function emitDashboardEvent(type: string, data: Record<string, unknown>): void {
+  apiEvents.emit("sse", { type, data, timestamp: new Date().toISOString() });
 }
 
 export function handleApiRequest(
@@ -20,11 +30,13 @@ export function handleApiRequest(
 
   if (!path.startsWith("/api/")) return false;
 
+  setCorsHeaders(res);
   res.setHeader("Content-Type", "application/json");
-  res.setHeader("Access-Control-Allow-Origin", "*");
 
   try {
     if (path === "/api/health") return sendJson(res, getHealth());
+    if (path === "/api/health/live") return sendJson(res, { status: "ok" });
+    if (path === "/api/health/ready") return sendJson(res, getReadiness());
     if (path === "/api/workflows") return sendJson(res, getWorkflows(url));
     if (path.match(/^\/api\/workflows\/[^/]+\/runs$/)) {
       const name = path.split("/")[3];
@@ -36,6 +48,9 @@ export function handleApiRequest(
     if (path === "/api/audit") return sendJson(res, getAuditData(url));
     if (path === "/api/audit/export") return handleAuditExport(url, res);
     if (path === "/api/config") return sendJson(res, getConfigSafe());
+    if (path === "/api/approvals") return sendJson(res, getApprovals(url));
+    if (path === "/api/agents") return sendJson(res, getAgentStatus());
+    if (path === "/api/events") return handleSSE(req, res);
 
     res.writeHead(404);
     res.end(JSON.stringify({ error: "Not found" }));
@@ -368,6 +383,78 @@ function getConfigSafe() {
   };
   redact(safe);
   return safe;
+}
+
+function getReadiness() {
+  try {
+    const stateDb = getStateDb();
+    stateDb.prepare("SELECT 1").get();
+    const agents = getRunningAgents();
+    return {
+      status: agents.length > 0 ? "ready" : "degraded",
+      agents_running: agents,
+      db: "ok",
+    };
+  } catch {
+    return { status: "not_ready", agents_running: [], db: "error" };
+  }
+}
+
+function getAgentStatus() {
+  const agents = ["airflow", "dbt", "snowflake", "comms"] as const;
+  return agents.map(name => ({
+    name,
+    running: isAgentRunning(name),
+  }));
+}
+
+function getApprovals(url: URL) {
+  const days = getDays(url);
+  const auditDb = getAuditDb();
+
+  const approvals = auditDb
+    .prepare(
+      `SELECT id, created_at, workflow, agent, tool, tier, input_json,
+              approved_by, success, error_message
+       FROM audit_log
+       WHERE write_action = 1
+       AND created_at >= datetime('now', '-' || ? || ' days')
+       ORDER BY created_at DESC LIMIT 200`
+    )
+    .all(days) as Array<Record<string, unknown>>;
+
+  const pending = approvals.filter(a => !a.approved_by);
+  const completed = approvals.filter(a => !!a.approved_by);
+
+  return { pending, completed, total: approvals.length, days };
+}
+
+function handleSSE(req: IncomingMessage, res: ServerResponse): boolean {
+  setCorsHeaders(res);
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+
+  res.write("data: {\"type\":\"connected\"}\n\n");
+
+  const heartbeat = setInterval(() => {
+    res.write(": heartbeat\n\n");
+  }, 15000);
+
+  const onEvent = (event: { type: string; data: unknown; timestamp: string }) => {
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+  };
+
+  apiEvents.on("sse", onEvent);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    apiEvents.off("sse", onEvent);
+  });
+
+  return true;
 }
 
 function formatUptime(ms: number): string {

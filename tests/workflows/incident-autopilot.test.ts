@@ -102,15 +102,12 @@ describe("incident-autopilot workflow", () => {
     expect(result.status).toBe("completed");
     expect(result.workflow).toBe("incident-autopilot");
 
-    // Should have dispatched to airflow agent
+    // Should have dispatched to airflow agent (read-only)
     const airflowMsgs = transport.getMessagesSentTo("airflow");
     expect(airflowMsgs.length).toBeGreaterThanOrEqual(1);
 
-    // Should have dispatched to comms agent (Slack post)
-    const commsMsgs = transport.getMessagesSentTo("comms");
-    expect(commsMsgs.length).toBeGreaterThanOrEqual(1);
-
-    // Audit log should have entries
+    // Comms writes go through executeWriteAction, which blocks at Tier 1
+    // Audit log should have entries (blocked write attempts are logged)
     const auditEntries = queryAudit({});
     expect(auditEntries.length).toBeGreaterThan(0);
   });

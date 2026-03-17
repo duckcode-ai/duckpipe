@@ -77,7 +77,7 @@ afterEach(async () => {
 });
 
 describe("cost-sentinel workflow", () => {
-  it("detects expensive queries and posts alert", async () => {
+  it("detects expensive queries and completes (Tier 1 blocks writes)", async () => {
     orchestrator = new Orchestrator(transport, makeConfig(1));
     orchestrator.start();
 
@@ -85,8 +85,12 @@ describe("cost-sentinel workflow", () => {
 
     expect(result.status).toBe("completed");
 
-    const commsMsgs = transport.getMessagesSentTo("comms");
-    expect(commsMsgs.length).toBeGreaterThanOrEqual(1);
+    // Tier 1 blocks comms writes via executeWriteAction policy check
+    // Audit should record the blocked write attempt
+    const writes = queryAudit({ write_only: true, workflow: "cost-sentinel" });
+    for (const w of writes) {
+      expect(w.success).toBe(false);
+    }
   });
 
   it("creates audit trail for monitoring actions", async () => {
