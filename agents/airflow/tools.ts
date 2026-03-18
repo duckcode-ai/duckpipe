@@ -280,12 +280,15 @@ export async function checkFailures(
       writeActionsNeeded: [],
     };
   }
+  console.log(`[airflow] checkFailures: baseUrl=${config.baseUrl}, hasAuth=${!!(config.username || config.apiKey)}`);
   let dags;
   try {
     dags = await listDags(config);
+    console.log(`[airflow] checkFailures: found ${dags.length} DAGs: ${dags.map(d => d.dagId).join(', ')}`);
   } catch (err) {
     // Airflow is down or credentials are wrong — this is not a pipeline incident.
     // Return a structured "unreachable" response so the orchestrator can skip cleanly.
+    console.error(`[airflow] checkFailures: listDags FAILED — ${err instanceof Error ? err.message : String(err)}`);
     return {
       status: "healthy",
       unreachable: true,
@@ -309,9 +312,10 @@ export async function checkFailures(
 
   for (const dag of dags) {
     const runs = await getDagRuns(config, dag.dagId, 1);
-    if (runs.length === 0) continue;
+    if (runs.length === 0) { console.log(`[airflow] checkFailures: ${dag.dagId} — no runs`); continue; }
 
     const latestRun = runs[0];
+    console.log(`[airflow] checkFailures: ${dag.dagId} latest run=${latestRun.dagRunId} state=${latestRun.state}`);
     if (latestRun.state !== "failed") continue;
 
     failedDags.push(dag.dagId);
@@ -430,7 +434,18 @@ export async function getRunningDags(
 
 function extractTableRefs(logs: string): string[] {
   const matches = logs.match(/\b(?:[A-Za-z_][A-Za-z0-9_]*\.){1,2}[A-Za-z_][A-Za-z0-9_]*\b/g) ?? [];
-  return [...new Set(matches)].slice(0, 10);
+  // Filter out filenames, Python modules, and other non-table artifacts from logs
+  const JUNK_EXTENSIONS = /\.(py|pyc|pyo|js|ts|sh|bash|yaml|yml|json|xml|cfg|conf|ini|log|txt|md|rst|csv|msgpack|pickle|parquet|avro|jar|class|so|dylib|dll|exe|bin|lock|toml|sql|html|css|whl|egg|gz|zip|tar)$/i;
+  const JUNK_SUFFIXES = /\.(com|org|net|io|dev|app|cloud)$/i;   // URLs
+  const JUNK_PREFIXES = /^(self|cls|None|True|False|null|undefined|import|from|return|raise|except|finally|async|await|function|const|let|var|if|else|for|while|try|catch|with|def|class|result|status|error|sys|os|re)\./i;
+  const filtered = [...new Set(matches)]
+    .filter(m => !JUNK_EXTENSIONS.test(m))
+    .filter(m => !JUNK_SUFFIXES.test(m))
+    .filter(m => !JUNK_PREFIXES.test(m))
+    .filter(m => !/^\d/.test(m))                          // skip numeric-prefixed refs
+    .filter(m => m.length > 3 && m.length < 120)          // skip too-short or too-long
+    .filter(m => !m.includes('__'));                       // skip dunder-style Python internals
+  return filtered.slice(0, 10);
 }
 
 export function classifyFromLogs(

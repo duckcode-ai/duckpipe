@@ -9,6 +9,7 @@ import type { DuckpipeConfig } from "./types.js";
 import { buildAssistantReadinessReport } from "./registry.js";
 import { getActiveOrchestrator } from "./runtime-context.js";
 import { askIncidentQuestion, getIncidentChatState } from "./incident-chat.js";
+import { getRetroReport, startRetroAnalysis } from "./retro-runner.js";
 
 let config: DuckpipeConfig | null = null;
 let startTime = Date.now();
@@ -47,6 +48,38 @@ export async function handleApiRequest(
       return sendJson(res, getWorkflowRuns(name, url));
     }
     if (path === "/api/incidents") return sendJson(res, getIncidents(url));
+    if (path.match(/^\/api\/incidents\/[^/]+\/retro$/)) {
+      const incidentId = path.split("/")[3];
+      if (req.method === "POST") {
+        // Manual retro trigger
+        if (!config) throw new Error("Config not loaded");
+        const existing = getRetroReport(incidentId);
+        if (existing && existing.status === "running") {
+          return sendJson(res, { ok: false, reason: "already_running", report: existing });
+        }
+        const incidentDetail = getIncidentDetail(incidentId);
+        if (!incidentDetail || !incidentDetail.incident_context) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: "Incident not found or missing context" }));
+          return sendJson(res, null as unknown);
+        }
+        const orchestrator = getActiveOrchestrator();
+        const ctx = incidentDetail.incident_context as import("./types.js").IncidentContext;
+        startRetroAnalysis(incidentId, ctx, config, orchestrator).catch((err) =>
+          console.error(`[api] Manual retro failed: ${err instanceof Error ? err.message : String(err)}`),
+        );
+        return sendJson(res, { ok: true, status: "started", incidentRunId: incidentId });
+      }
+      const report = getRetroReport(incidentId);
+      return sendJson(res, report ?? { status: "not_started", incidentRunId: incidentId });
+    }
+    // GET /api/incidents/:id — full detail for a single incident
+    if (path.match(/^\/api\/incidents\/[^/]+$/) && !path.endsWith("/incidents")) {
+      const incidentId = path.split("/")[3];
+      const detail = getIncidentDetail(incidentId);
+      if (!detail) { res.writeHead(404); return sendJson(res, { error: "Incident not found" }); }
+      return sendJson(res, detail);
+    }
     if (path.match(/^\/api\/incidents\/[^/]+\/chat$/)) {
       const incidentId = path.split("/")[3];
       if (req.method === "GET") {
@@ -58,9 +91,19 @@ export async function handleApiRequest(
           throw new Error("Config not loaded");
         }
         const question = typeof body.question === "string" ? body.question : "";
-        const result = await askIncidentQuestion(incidentId, question, config, getActiveOrchestrator());
-        emitDashboardEvent("incident-chat", { incidentRunId: incidentId, message: result.message });
-        return sendJson(res, result);
+        console.log(`[api] Chat POST for ${incidentId.slice(0, 8)}: "${question.slice(0, 80)}"`);
+        try {
+          const result = await askIncidentQuestion(incidentId, question, config, getActiveOrchestrator());
+          console.log(`[api] Chat POST complete for ${incidentId.slice(0, 8)} — ${result.messages?.length ?? 0} messages`);
+          emitDashboardEvent("incident-chat", { incidentRunId: incidentId, message: result.message });
+          return sendJson(res, result);
+        } catch (chatErr) {
+          const msg = chatErr instanceof Error ? chatErr.message : String(chatErr);
+          console.error(`[api] Chat POST error for ${incidentId.slice(0, 8)}: ${msg}`);
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: msg }));
+          return true;
+        }
       }
       res.writeHead(405);
       res.end(JSON.stringify({ error: "Method not allowed" }));
@@ -242,13 +285,19 @@ function getIncidents(url: URL) {
     )
     .all(days) as Array<Record<string, unknown>>;
 
-  const incidents = runs.map((r) => {
-    let result: Record<string, unknown> = {};
-    try {
-      result = r.result_json ? JSON.parse(r.result_json as string) : {};
-    } catch { /* empty */ }
-    return { ...r, parsed_result: result };
-  });
+  const incidents = runs
+    .map((r) => {
+      let result: Record<string, unknown> = {};
+      try {
+        result = r.result_json ? JSON.parse(r.result_json as string) : {};
+      } catch { /* empty */ }
+      return { ...r, parsed_result: result };
+    })
+    .filter((r) => {
+      // Only include real incidents that have incidentContext (not healthy/skipped/unreachable)
+      const s = r.parsed_result.status as string | undefined;
+      return r.parsed_result.incidentContext && s !== "healthy" && s !== "skipped";
+    });
 
   // Daily counts for chart
   const dailyCounts = stateDb
@@ -519,6 +568,53 @@ function getLatestStory() {
     } catch {}
   }
   return null;
+}
+
+function getIncidentDetail(incidentId: string): Record<string, unknown> | null {
+  const stateDb = getStateDb();
+  const row = stateDb.prepare(
+    `SELECT id, workflow, started_at, completed_at, status, result_json
+     FROM workflow_runs WHERE id = ?`,
+  ).get(incidentId) as { id: string; workflow: string; started_at: string; completed_at: string; status: string; result_json: string } | undefined;
+  if (!row || !row.result_json) return null;
+
+  try {
+    const result = JSON.parse(row.result_json) as Record<string, unknown>;
+    const story = result.story as string | undefined;
+    const storyOutput = result.storyOutput as Record<string, unknown> | undefined;
+    const incidentContext = result.incidentContext as Record<string, unknown> | undefined;
+
+    return {
+      id: row.id,
+      workflow: row.workflow,
+      started_at: row.started_at,
+      status: row.status,
+      story: story ?? "",
+      story_output: storyOutput ?? null,
+      incident_context: incidentContext ?? null,
+      severity: result.severity ?? null,
+      rootCause: result.rootCause ?? null,
+      rootCauseCategory: result.rootCauseCategory ?? null,
+      dbtChangesFound: (result.dbtChangesFound as number) ?? 0,
+      anomaliesFound: (result.anomaliesFound as number) ?? 0,
+      changedTables: (result.changedTables as string[]) ?? [],
+      affectedModelCount: (result.affectedModelCount as number) ?? 0,
+      blastRadius: Array.isArray((incidentContext as { impact?: { blastRadius?: unknown[] } } | undefined)?.impact?.blastRadius)
+        ? ((incidentContext as { impact?: { blastRadius?: unknown[] } }).impact?.blastRadius ?? [])
+        : [],
+      likelyOwner: (incidentContext as { impact?: { likelyOwner?: string } } | undefined)?.impact?.likelyOwner ?? null,
+      runbook: (incidentContext as { impact?: { runbook?: string } } | undefined)?.impact?.runbook ?? null,
+      entityGraph: (incidentContext as { entityGraph?: unknown } | undefined)?.entityGraph ?? null,
+      topEvidence: Array.isArray((storyOutput as { topEvidence?: unknown[] } | undefined)?.topEvidence)
+        ? ((storyOutput as { topEvidence?: string[] }).topEvidence ?? [])
+        : [],
+      unknowns: Array.isArray((storyOutput as { unknowns?: unknown[] } | undefined)?.unknowns)
+        ? ((storyOutput as { unknowns?: string[] }).unknowns ?? [])
+        : [],
+    };
+  } catch {
+    return null;
+  }
 }
 
 function getConfigSafe() {

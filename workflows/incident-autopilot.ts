@@ -9,6 +9,7 @@ import type {
 } from "../src/types.js";
 import { buildCandidateCauses, generateIncidentStory } from "../src/story.js";
 import { enrichIncidentContext } from "../src/entity-graph.js";
+import { startRetroAnalysis } from "../src/retro-runner.js";
 
 function classifySeverity(
   category: string,
@@ -337,6 +338,11 @@ export async function runIncidentAutopilot(
         { severity, channels: [slackChannel] }
       );
     }
+
+    // ── Step 5.5: Kick off autonomous retro analysis (fire-and-forget) ──
+    startRetroAnalysis(runId, incidentContext, config, orchestrator).catch((err) =>
+      console.error(`[incident-autopilot] Retro analysis failed: ${err instanceof Error ? err.message : String(err)}`),
+    );
 
     // ── Step 6: Create Jira ticket (Tier 2+) ─────────────────────────────
     if (config.duckpipe.trust_tier >= 2 && config.integrations.jira?.enabled) {

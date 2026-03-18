@@ -83,6 +83,15 @@ CREATE TABLE IF NOT EXISTS incident_workspaces (
   updated_at TEXT NOT NULL DEFAULT (datetime('now', 'utc')),
   FOREIGN KEY (incident_run_id) REFERENCES workflow_runs(id)
 );
+
+CREATE TABLE IF NOT EXISTS incident_retro_reports (
+  incident_run_id TEXT PRIMARY KEY,
+  report_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  started_at TEXT NOT NULL DEFAULT (datetime('now', 'utc')),
+  completed_at TEXT,
+  FOREIGN KEY (incident_run_id) REFERENCES workflow_runs(id)
+);
 `;
 
 export function getStateDb(dataDir = "./data"): Database.Database {

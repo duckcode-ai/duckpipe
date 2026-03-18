@@ -231,6 +231,17 @@ export interface InvestigationStep {
   usedLiveData: boolean;
 }
 
+export interface CritiqueResult {
+  questions: string[];
+  refinedHypotheses: InvestigationHypothesis[];
+  confidence: "high" | "medium" | "low";
+}
+
+export interface FollowUpInvestigation {
+  question: string;
+  result: InvestigationResult;
+}
+
 export interface InvestigationResult {
   playbook: string;
   summary: string;
@@ -242,6 +253,9 @@ export interface InvestigationResult {
   evidenceIds: string[];
   usedLiveData: boolean;
   steps: InvestigationStep[];
+  critique?: CritiqueResult;
+  followUpInvestigations?: FollowUpInvestigation[];
+  investigationDepth?: number;
   objectChecks?: Array<{
     objectName: string;
     status: "exists" | "missing" | "inaccessible" | "unknown";
@@ -305,6 +319,29 @@ export interface IncidentWorkspace {
   }>;
   conversationCount: number;
   lastUpdated: string;
+}
+
+export interface RetroLevel {
+  depth: number;
+  question: string;
+  answer: string;
+  facts: InvestigationFact[];
+  sources: string[];
+  subAgentsUsed: string[];
+  confidence: "high" | "medium" | "low";
+  durationMs: number;
+}
+
+export interface RetroReport {
+  incidentRunId: string;
+  levels: RetroLevel[];
+  rootCauseChain: string[];
+  solutionApproach: string;
+  confidence: "high" | "medium" | "low";
+  startedAt: string;
+  completedAt: string | null;
+  durationMs: number;
+  status: "running" | "completed" | "partial";
 }
 
 export interface IncidentContext {

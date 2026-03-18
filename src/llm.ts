@@ -213,7 +213,14 @@ async function openaiComplete(model: string, prompt: string, systemPrompt?: stri
       "Content-Type": "application/json",
       "Authorization": `Bearer ${key}`,
     },
-    body: JSON.stringify({ model, messages, max_tokens: 4096 }),
+    body: JSON.stringify({
+      model,
+      messages,
+      // Modern OpenAI models (o1, o3, gpt-4o, gpt-4.5, gpt-5+) require max_completion_tokens
+      ...(/^(o[0-9]|gpt-4o|gpt-4\.5|gpt-[5-9])/.test(model)
+        ? { max_completion_tokens: 4096 }
+        : { max_tokens: 4096 }),
+    }),
   });
 
   if (!res.ok) {

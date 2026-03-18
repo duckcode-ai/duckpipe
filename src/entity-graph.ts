@@ -8,10 +8,15 @@ import type {
 } from "./types.js";
 
 export function enrichIncidentContext(context: IncidentContext): IncidentContext {
+  // Filter out filenames / non-table artifacts that extractTableRefs may have captured
+  const JUNK_TABLE = /\.(py|pyc|js|ts|sh|yaml|yml|json|xml|cfg|conf|ini|log|txt|md|rst|csv|msgpack|pickle|parquet|lock|toml|sql|html|css|whl|egg|gz|zip|tar|com|org|net|io|dev|app|cloud)$/i;
+  const JUNK_PREFIX = /^(self|cls|result|status|error|sys|os|re)\./i;
+  const cleanTables = context.impact.affectedTables.filter((t) => !JUNK_TABLE.test(t) && !JUNK_PREFIX.test(t) && !t.includes("__") && t.length > 3);
+
   const blastRadius = dedupeAssets([
-    ...context.impact.blastRadius,
-    ...context.impactedAssets,
-    ...context.impact.affectedTables.map((name) => ({ kind: "table" as const, name })),
+    ...context.impact.blastRadius.filter((a) => a.kind !== "table" || !JUNK_TABLE.test(a.name)),
+    ...context.impactedAssets.filter((a) => a.kind !== "table" || !JUNK_TABLE.test(a.name)),
+    ...cleanTables.map((name) => ({ kind: "table" as const, name })),
     ...context.impact.affectedModels.map((name) => ({ kind: "model" as const, name })),
     ...context.impact.affectedDags.map((name) => ({ kind: "dag" as const, name })),
   ]);

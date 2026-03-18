@@ -109,6 +109,33 @@ export async function askIncidentQuestion(
 
   const incident = getIncidentRun(incidentRunId);
   const userMessage = insertIncidentChatMessage(incidentRunId, "user", trimmed);
+  const priorMessages = listIncidentChatMessages(incidentRunId);
+
+  // Fast path: answer directly from incident context + story with a single LLM call.
+  // This avoids the slow supervisor loop (10+ agent dispatches through file bus).
+  const t0 = Date.now();
+  console.log(`[incident-chat] Fast-path for ${incidentRunId.slice(0, 8)}: "${trimmed.slice(0, 60)}"`);
+  const fastAnswer = await fastPathAnswer(trimmed, incident.context, incident.story, priorMessages, config);
+  if (fastAnswer) {
+    console.log(`[incident-chat] Fast-path answered in ${Date.now() - t0}ms`);
+    const workspace = getIncidentWorkspace(incidentRunId);
+    const assistantMessage = insertIncidentChatMessage(incidentRunId, "assistant", fastAnswer.answer, {
+      sources: fastAnswer.sources,
+      evidenceIds: fastAnswer.evidenceIds,
+      followUps: fastAnswer.followUps,
+      usedLiveData: false,
+    });
+    return {
+      incidentRunId,
+      message: assistantMessage,
+      messages: [userMessage, assistantMessage],
+      suggestedQuestions: fastAnswer.followUps.length > 0 ? fastAnswer.followUps : getSuggestedIncidentQuestions(incident.context),
+      workspace,
+    };
+  }
+
+  // Slow path: full supervisor investigation (only if fast path fails)
+  console.log(`[incident-chat] Fast-path failed, falling back to full supervisor`);
   const { investigation, workspace } = await superviseIncidentQuestion(
     incidentRunId,
     trimmed,
@@ -134,6 +161,64 @@ export async function askIncidentQuestion(
   };
 }
 
+async function fastPathAnswer(
+  question: string,
+  context: IncidentContext,
+  story: StoryOutput | null,
+  priorMessages: IncidentChatMessage[],
+  config: DuckpipeConfig,
+): Promise<IncidentChatAnswer | null> {
+  try {
+    const provider = getLlmProvider(config, "comms");
+
+    const conversationHistory = priorMessages.slice(-6).map((m) =>
+      `${m.role === "user" ? "User" : "DuckPipe"}: ${m.content.slice(0, 500)}`
+    ).join("\n\n");
+
+    const systemPrompt = [
+      loadAgentSpec("comms"),
+      "You are DuckPipe's incident investigator for data engineering teams (Airflow, dbt, Snowflake).",
+      "Answer the user's question using ONLY the incident context and story provided below.",
+      "Be specific, cite evidence IDs when relevant, and structure your answer with markdown.",
+      "Include sections as appropriate: ## What Happened, ## Evidence, ## Root Cause, ## Impact, ## Next Steps.",
+      "Never guess — if information is missing, say so clearly.",
+      "Return strict JSON: { \"answer\": string, \"evidenceIds\": string[], \"followUps\": string[], \"sources\": string[] }",
+    ].join("\n\n");
+
+    const evidenceSummary = (context.evidence || []).slice(0, 5).map((e) =>
+      `[${e.id}] (${e.source}) ${e.summary}`
+    ).join("\n");
+
+    const impactSummary = [
+      `Severity: ${context.severity}`,
+      `DAGs: ${context.impact.affectedDags.join(", ")}`,
+      `Tables: ${context.impact.affectedTables.slice(0, 5).join(", ")}`,
+      `Models: ${(context.impact.affectedModels || []).join(", ") || "none"}`,
+      `Owner: ${context.impact.likelyOwner || "unknown"}`,
+    ].join("\n");
+
+    const prompt = [
+      `Question: ${question}`,
+      `\nIncident: ${context.incidentId} | Severity: ${context.severity} | DAG: ${context.dag.dagId ?? "unknown"}`,
+      `Root Cause: ${context.candidateCauses?.[0]?.summary ?? "unknown"}`,
+      `\nEvidence:\n${evidenceSummary || "No structured evidence"}`,
+      `\nImpact:\n${impactSummary}`,
+      story?.oncallSummary ? `\nOn-Call Summary:\n${story.oncallSummary.slice(0, 600)}` : "",
+      story?.managerSummary ? `\nManager Summary:\n${story.managerSummary.slice(0, 400)}` : "",
+      conversationHistory ? `\nPrior Conversation:\n${conversationHistory}` : "",
+      "\nAnswer the question concisely with markdown formatting. Return JSON.",
+    ].filter(Boolean).join("\n");
+
+    const raw = await provider.complete(prompt, systemPrompt);
+    const normalized = raw.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/, "").trim();
+    const parsed = IncidentChatAnswerSchema.parse(JSON.parse(normalized));
+    return parsed;
+  } catch (err) {
+    console.error(`[incident-chat] Fast-path LLM error: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
 function getIncidentRun(incidentRunId: string): {
   record: IncidentRunRecord;
   context: IncidentContext;
@@ -143,7 +228,7 @@ function getIncidentRun(incidentRunId: string): {
   const row = db.prepare(
     `SELECT id, workflow, started_at, completed_at, status, result_json
      FROM workflow_runs
-     WHERE id = ? AND workflow = 'incident-autopilot'
+     WHERE id = ?
      LIMIT 1`
   ).get(incidentRunId) as IncidentRunRecord | undefined;
 
@@ -154,7 +239,11 @@ function getIncidentRun(incidentRunId: string): {
   const result = row.result_json ? JSON.parse(row.result_json) as Record<string, unknown> : {};
   const context = result.incidentContext as IncidentContext | undefined;
   if (!context) {
-    throw new Error(`Incident ${incidentRunId} has no incident context`);
+    throw new Error(
+      `Incident ${incidentRunId} has no incident context. ` +
+      `This run may be a healthy check (status: ${result.status ?? row.status}). ` +
+      `Only real failures with detected issues can be investigated.`
+    );
   }
 
   return {
@@ -210,19 +299,31 @@ async function generateIncidentAnswerWithLlm(
     const provider = getLlmProvider(config, "comms");
     const systemPrompt = [
       loadAgentSpec("comms"),
-      "You are DuckPipe's incident investigator.",
+      "You are DuckPipe's autonomous incident investigator for data engineering teams (Airflow, dbt, Snowflake).",
       "Answer only from the provided incident context and structured investigation result.",
       "Never guess. If evidence is missing, say what is still unknown.",
+      "The investigation includes a self-critique phase and auto-investigated follow-up questions.",
+      "Structure your answer with markdown: use ## headings for sections, **bold** for key terms, and bullet lists for facts.",
+      "Include these sections: Best Explanation, Supporting Evidence, Critique & Follow-ups (if any), Remaining Unknowns, Recommended Next Steps.",
       "Return strict JSON only with keys: answer, evidenceIds, followUps, sources, usedLiveData.",
     ].join("\n\n");
+
+    const critiqueContext = investigation.critique
+      ? `\nCritique: ${JSON.stringify(investigation.critique)}`
+      : "";
+    const followUpContext = (investigation.followUpInvestigations ?? []).length > 0
+      ? `\nAuto-investigated follow-ups: ${JSON.stringify(investigation.followUpInvestigations!.map((fu) => ({ question: fu.question, summary: fu.result.summary, facts: fu.result.facts.slice(0, 3) })))}`
+      : "";
 
     const prompt = [
       `Question: ${question}`,
       `IncidentContext: ${JSON.stringify(context)}`,
       `StoryOutput: ${JSON.stringify(story)}`,
       `InvestigationResult: ${JSON.stringify(investigation)}`,
-      "Write a crisp answer that explains the current best explanation, supporting facts, unknowns, and next checks.",
-    ].join("\n\n");
+      critiqueContext,
+      followUpContext,
+      "Write a crisp, markdown-formatted answer covering: best explanation, supporting evidence, critique insights, remaining unknowns, and next steps.",
+    ].filter(Boolean).join("\n\n");
 
     const raw = await provider.complete(prompt, systemPrompt);
     const normalized = raw.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/, "").trim();
@@ -243,28 +344,52 @@ function generateIncidentAnswerFallback(
   const opening = story?.oncallSummary?.split("\n").slice(0, 2).join(" ")
     ?? `Incident ${context.incidentId} is under investigation.`;
   lines.push(opening);
-  lines.push(`Playbook: ${investigation.playbook}.`);
+  lines.push(`*Playbook: ${investigation.playbook}*`);
 
   if (investigation.hypotheses[0]) {
-    lines.push(`Best current explanation: ${investigation.hypotheses[0].summary}`);
+    lines.push(`\n## Best Explanation\n**${investigation.hypotheses[0].summary}** (confidence: ${investigation.hypotheses[0].confidence})`);
   }
   if (investigation.facts.length > 0) {
-    lines.push("Key facts:");
-    for (const fact of investigation.facts.slice(0, 3)) {
-      lines.push(`- ${fact.summary}`);
+    lines.push("\n## Supporting Evidence");
+    for (const fact of investigation.facts.slice(0, 4)) {
+      lines.push(`- **${fact.source}**: ${fact.summary}`);
     }
   }
+
+  // Critique & follow-up results
+  const critique = investigation.critique;
+  const followUpInvs = investigation.followUpInvestigations ?? [];
+  if (critique && (critique.questions.length > 0 || followUpInvs.length > 0)) {
+    lines.push("\n## Critique & Follow-ups");
+    if (critique.confidence !== "low") {
+      lines.push(`Critique confidence: **${critique.confidence}**`);
+    }
+    for (const fu of followUpInvs) {
+      lines.push(`- **Q: ${fu.question}** \u2192 ${fu.result.summary}`);
+    }
+    const unansweredCritique = critique.questions.filter(
+      (q) => !followUpInvs.some((fu) => fu.question === q),
+    );
+    for (const q of unansweredCritique.slice(0, 2)) {
+      lines.push(`- *Still to investigate:* ${q}`);
+    }
+  }
+
   if (investigation.unknowns.length > 0) {
-    lines.push("Still unknown:");
-    for (const item of investigation.unknowns.slice(0, 2)) {
+    lines.push("\n## Remaining Unknowns");
+    for (const item of investigation.unknowns.slice(0, 3)) {
       lines.push(`- ${item}`);
     }
   }
   if (investigation.nextChecks.length > 0) {
-    lines.push("Next checks:");
+    lines.push("\n## Recommended Next Steps");
     for (const item of investigation.nextChecks.slice(0, 3)) {
       lines.push(`- ${item}`);
     }
+  }
+
+  if (investigation.subAgents && investigation.subAgents.length > 0) {
+    lines.push(`\n---\n*Investigation depth: ${investigation.investigationDepth ?? 1} | Sub-agents: ${investigation.subAgents.map((a) => a.name).join(", ")} | Follow-ups auto-investigated: ${followUpInvs.length}*`);
   }
 
   const followUps = buildFollowUps(question, context, investigation);
@@ -286,6 +411,22 @@ function buildFollowUps(
   const lower = question.toLowerCase();
   const modelName = inferModelNames(context)[0];
   const sourceTable = context.impact.affectedTables[0] ?? investigation.sources.find((item) => item.startsWith("snowflake:"))?.replace(/^snowflake:/, "");
+
+  // Prioritize remaining unknowns and unanswered critique questions
+  const autoInvestigated = new Set((investigation.followUpInvestigations ?? []).map((fu) => fu.question.toLowerCase().trim()));
+  const remainingCritiqueQs = (investigation.critique?.questions ?? [])
+    .filter((q) => !autoInvestigated.has(q.toLowerCase().trim()));
+  const remainingUnknowns = investigation.unknowns
+    .filter((u) => !autoInvestigated.has(u.toLowerCase().trim()))
+    .map((item) => item.endsWith("?") ? item : `${item.replace(/\.$/, "")}?`);
+
+  if (remainingCritiqueQs.length > 0 || remainingUnknowns.length > 0) {
+    return uniq([
+      ...remainingCritiqueQs,
+      ...remainingUnknowns,
+      ...investigation.nextChecks.map((item) => item.endsWith("?") ? item : `${item.replace(/\.$/, "")}?`),
+    ]).slice(0, 4);
+  }
 
   if (/owner|next|fix/.test(lower)) {
     return [
