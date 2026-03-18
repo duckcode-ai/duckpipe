@@ -8,7 +8,7 @@ Step-by-step guide to connect DuckPipe to your Apache Airflow instance. Covers m
 
 - DuckPipe installed (`npm install` completed)
 - Network access from DuckPipe host to your Airflow REST API endpoint
-- An Airflow user account with appropriate role (Viewer for Tier 1, Op for Tier 2)
+- An Airflow user account with Viewer role (read-only)
 
 ---
 
@@ -79,16 +79,6 @@ If you need a custom role with minimum permissions:
    - `can read on Task Instances`
    - `can read on Task Logs`
 4. Assign this role to the `duckpipe` user
-
-### Tier 2 (Supervised Writes) — Op Role
-
-For triggering retries and clearing failed tasks:
-
-1. Change the user role to `Op`, or create a custom role with:
-   - All Tier 1 permissions, plus:
-   - `can create on DAG Runs` (trigger new runs)
-   - `can delete on Task Instances` (clear for retry)
-2. Optional: Use `allowed_dags` in `duckpipe.yaml` to scope access to specific DAGs
 
 ---
 
@@ -179,14 +169,6 @@ DuckPipe connection verify — checking your integrations...
 
 ✓ Airflow connected (version 2.8.1)
   Permissions: GET /dags ✓  GET /dagRuns ✓  POST /dagRuns ✗ (Tier 1 read-only)
-  DAGs visible: 47
-```
-
-### Expected Output (Tier 2)
-
-```
-✓ Airflow connected (version 2.8.1)
-  Permissions: GET /dags ✓  GET /dagRuns ✓  POST /dagRuns ✓
   DAGs visible: 47
 ```
 

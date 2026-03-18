@@ -33,11 +33,11 @@ DuckPipe is a self-hosted, autonomous agent platform that monitors and manages d
 
 - **Zero cloud relay**: No data, credentials, or telemetry leaves the deployment network
 - **Memory-only secrets**: Credentials are never written to disk or logged
-- **Container isolation**: Each agent runs in a separate Docker container with no inter-container networking
+- **Agent isolation**: Each agent runs in a separate process or Docker container with scoped credentials
 - **Immutable audit log**: Every action is logged before execution; logs cannot be modified or deleted
-- **Three-tier trust model**: Read-only by default; writes require explicit configuration and human approval
+- **Tier 1 read-only**: The only supported tier today — no write actions possible at code level
 
-**Risk classification**: Low risk at Tier 1 (read-only). Controlled risk at Tier 2 (human-approved writes). Scoped risk at Tier 3 (policy-bounded autonomous writes).
+**Risk classification**: Low risk. DuckPipe operates exclusively at Tier 1 (read-only). No write actions are supported. The policy engine blocks all writes unconditionally.
 
 ---
 
@@ -54,7 +54,7 @@ DuckPipe is a self-hosted, autonomous agent platform that monitors and manages d
 | Jira/Confluence tokens | Medium | Memory-only vault; never logged |
 | Audit log data | High | SQLite triggers prevent modification/deletion |
 | Production Snowflake data | Critical | Read-only role; no INSERT/UPDATE/DELETE grants |
-| Production Airflow DAGs | Critical | Viewer role (Tier 1); Op role scoped to allowed_dags (Tier 2+) |
+| Production Airflow DAGs | Critical | Viewer role only — no write access granted |
 
 ### Threat Actors
 
@@ -62,7 +62,7 @@ DuckPipe is a self-hosted, autonomous agent platform that monitors and manages d
 |---|---|---|
 | Compromised agent container | Lateral movement to other integrations | Container isolation; agents receive only their own credentials |
 | Malicious skill contributor | Code injection via skill PRs | Skills reviewed before merge; agents sandboxed; policy engine blocks unscoped writes |
-| Insider with config access | Privilege escalation via tier/policy change | Tier changes require restart; policy loaded at boot; audit log is immutable |
+| Insider with config access | Privilege escalation via tier/policy change | Only Tier 1 supported; higher tiers are not implemented; audit log is immutable |
 | Network attacker | Credential interception | HTTPS-only for all API calls; no cloud relay; localhost-bound dashboard by default |
 | Supply chain attack | Compromised npm dependency | Minimal dependency tree (6 runtime deps); locked versions; no auto-update |
 
@@ -373,28 +373,36 @@ CORS is restricted to `http://localhost:9876` when no token is set, or `*` when 
 
 ## Trust Tier Enforcement
 
+### Current State: Tier 1 Only
+
+DuckPipe currently supports **only Tier 1 (read-only)**. Tiers 2 and 3 are on the roadmap but not implemented.
+
 ### Enforcement Points
 
 The trust tier is checked at three levels:
 
-1. **Policy engine** (`src/policy.ts`): Before every write action, checks tier and policy rules
-2. **Orchestrator** (`src/orchestrator.ts`): `executeWriteAction()` calls policy check before dispatch
-3. **Agent tools**: Write tools are marked `[WRITE]` in agent AGENT.md files and enforced in code
+1. **Policy engine** (`src/policy.ts`): Returns `{ allowed: false }` for **every** write action at Tier 1
+2. **Orchestrator** (`src/orchestrator.ts`): `executeWriteAction()` calls policy check before dispatch — always blocked at Tier 1
+3. **Agent tools**: Write tools exist in agent code but are unreachable at Tier 1
 
 ### Tier 1 Guarantee
 
-When `trust_tier: 1`:
+When `trust_tier: 1` (the only supported value):
 - The policy engine returns `{ allowed: false }` for **every** write action
 - No configuration, policy file, or agent behavior can override this
-- The code path for write execution is unreachable at Tier 1
+- The code path for write execution is unreachable
 - This is verified by automated tests (`tests/policy.test.ts`, `tests/orchestrator-approval.test.ts`)
 
-### Tier Escalation Requires
+### Permissions at Tier 1
 
-1. Manual edit of `duckpipe.yaml` (not exposed via API or dashboard)
-2. Process restart (tier is loaded at boot, not hot-reloaded)
-3. Corresponding permission grants in target systems (Snowflake OPERATE, Airflow Op role)
-4. `npx duckpipe verify` to confirm permissions match tier
+| System | Role | Access Level |
+|---|---|---|
+| Airflow | Viewer | Read DAGs, runs, task instances, logs |
+| Snowflake | DUCKPIPE_READER | SELECT only — no DML, DDL, or OPERATE |
+| dbt Cloud | read:jobs, read:runs | Read jobs, runs, manifest |
+| Slack | chat:write, channels:read | Read channel history; post alerts |
+| Jira | Read only | Read issues (no creation) |
+| Confluence | Read only | Search pages (no creation) |
 
 ---
 
@@ -486,7 +494,7 @@ Use this section to scope a penetration test of your DuckPipe deployment.
 ### Recommended Test Environment
 
 1. Deploy DuckPipe with all integrations pointing to test/staging instances
-2. Set `trust_tier: 3` with a permissive policy to test all code paths
+2. Keep `trust_tier: 1` (the only supported value) to test realistic code paths
 3. Monitor audit log during testing to verify action recording
 4. Test with both Docker and process runtime modes
 
@@ -517,9 +525,9 @@ Use this checklist for your enterprise security review board.
 
 - [ ] Dashboard binds to localhost by default; requires bearer token for remote access
 - [ ] Slack listener filters by allowed_channels — no DM support
-- [ ] Snowflake role grants follow least privilege (READER for Tier 1, OPERATOR for Tier 2)
-- [ ] Airflow permissions scoped by allowed_dags configuration
-- [ ] Policy engine consulted before every write action
+- [ ] Snowflake role grants follow least privilege (DUCKPIPE_READER — SELECT only)
+- [ ] Airflow permissions use Viewer role (read-only)
+- [ ] Policy engine blocks all write actions at Tier 1 (the only supported tier)
 
 ### Input Validation
 

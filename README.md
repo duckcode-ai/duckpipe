@@ -7,49 +7,27 @@ Built by [Duckcode.ai](https://duckcode.ai) · Apache 2.0 · Runs in your networ
 ---
 
 ```
-$ npx duckpipe verify
-
-DuckPipe connection verify — checking your integrations...
-
-✓ Airflow connected (version 2.8.1)
-  Permissions: GET /dags ✓  GET /dagRuns ✓  POST /dagRuns ✗ (Tier 1 read-only)
-  DAGs visible: 47
-
-✓ Snowflake connected (account: myorg.us-east-1)
-  Role: DUCKPIPE_READER  Warehouse: COMPUTE_WH
-  Permissions: SELECT ✓  OPERATE ✗  CREATE ✗  DROP ✗
-  Query history access: ✓
-  Tables visible: 312
-
-✓ Slack connected (workspace: Acme Corp)
-  Bot scopes: chat:write ✓  channels:read ✓
-  Channels accessible: #data-incidents ✓  #data-engineering ✓
-
-✓ dbt Cloud connected (account: 12345)
-  Projects: 3  Jobs: 18  Last run: 2 min ago
-
-- Jira not configured (optional)
-- Confluence not configured (optional)
-
-Current trust tier: 1 (read-only)
-Safe to enable: incident-autopilot (observe mode), sla-guardian, query-sage
-```
-
-```
 $ npx duckpipe start
 
 [03:14:02] 🦆 DuckPipe started — trust tier 1 (read-only)
-[03:14:02] Watching 47 DAGs, 312 tables, 18 dbt jobs
-[03:14:15] ⚠ DAG failure detected: ingestion_stripe_payments (run_id: scheduled__2026-03-16)
+[03:14:02] Starting agents...
+  ✓ airflow agent started
+  ✓ dbt agent started
+  ✓ snowflake agent started
+  ✓ comms agent started
+[03:14:02] Scheduled workflows: incident-autopilot, sla-guardian, cost-sentinel
+[03:14:15] ⚠ DAG failure detected: ingestion_stripe_payments
 [03:14:16] Spawning airflow agent → analyzing task logs...
-[03:14:18] Root cause: upstream API timeout (task: extract_payments, attempt 2/2)
+[03:14:18] Root cause: upstream API timeout (task: extract_payments)
 [03:14:18] Severity: P2 — degraded but not SLA-critical
 [03:14:19] → Slack #data-incidents:
            🟡 *P2 — ingestion_stripe_payments failed*
-           Root cause: Stripe API timeout during extract_payments (connection_error)
-           Evidence: "HTTPSConnectionPool: Read timed out (read timeout=30)"
-           Recommended: Retry after verifying Stripe API status
-           _Detected by DuckPipe — duckcode.ai_
+           Root cause: Stripe API timeout during extract_payments
+[03:14:20] Starting autonomous retro analysis...
+[03:14:20] [retro L1] Investigating: "What exactly happened?"
+[03:14:35] [retro L2] Investigating: "Why did it happen?"
+[03:15:10] [retro L3] Investigating: "What changed in the last 24h?"
+[03:15:45] Retro complete — 3 levels, confidence=high
 ```
 
 ---
@@ -62,147 +40,256 @@ cd duckpipe
 npm install
 cp config-examples/.env.example .env          # add your API keys
 cp config-examples/duckpipe.example.yaml duckpipe.yaml
-npx duckpipe verify                            # check connections before trusting anything
-npx duckpipe start
+npx duckpipe start                             # dashboard at http://localhost:9876
 ```
 
 ### Prerequisites
 
 - **Node.js** >= 20.0.0
-- **Docker** (or Podman) for agent container isolation
+- **Docker** (optional, for agent container isolation — falls back to process mode)
 - API credentials for your integrations (Airflow, Snowflake, dbt Cloud, Slack, etc.)
-
-### Docker Compose (Full Stack)
-
-```bash
-cp config-examples/.env.example .env
-docker compose -f config-examples/docker-compose.yaml up -d
-```
-
-### Kubernetes
-
-Manifests are in `config-examples/k8s/`. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for deployment details.
+- **OpenAI API key** (for LLM-powered retro analysis and incident investigation)
 
 ---
 
-## Trust Tiers
+## How It Works
 
-DuckPipe enforces a three-tier trust model. You start at Tier 1 (read-only) and promote when your team is ready.
+DuckPipe runs at **Tier 1 (read-only)** — it connects to your data infrastructure with minimum read permissions, detects failures, and explains what happened. It never modifies anything in your systems.
 
-| | Tier 1 — Sandbox | Tier 2 — Supervised | Tier 3 — Autonomous |
+### What DuckPipe Does
+
+1. **Detects** — Polls Airflow for DAG failures every 2 minutes
+2. **Investigates** — Dispatches agents to Airflow, dbt, and Snowflake to gather evidence
+3. **Diagnoses** — Correlates failures across DAGs, dbt models, and Snowflake tables
+4. **Alerts** — Posts a structured diagnosis to Slack with severity, root cause, and evidence
+5. **Retrospects** — Runs an autonomous 5-level retro analysis (5-whys) with sub-agents
+
+### What DuckPipe Does NOT Do
+
+- Never triggers DAG runs or retries tasks
+- Never modifies Snowflake tables, roles, or warehouses
+- Never pushes code or opens PRs
+- Never creates Jira tickets or Confluence pages without explicit future tier promotion
+
+---
+
+## Agents
+
+DuckPipe runs four specialized agents, each connecting to one part of your stack:
+
+| Agent | Connects To | Tools | What It Reads |
 |---|---|---|---|
-| **Risk** | Zero | Controlled | Pre-approved scope |
-| **Writes** | Never | With Slack approval | Within policy rules |
-| **Setup time** | 10 minutes | 30 minutes | 1 hour |
-| **Airflow** | Read DAGs, logs | + Retry failed tasks | + Auto-retry on policy match |
-| **Snowflake** | Read queries, costs | + Kill runaway queries | + Auto-kill above threshold |
-| **dbt** | Read models, runs | + Open fix PRs | + Auto-PR for known drift |
-| **Slack** | Receive alerts | + Post alerts, request approval | + Post without confirmation |
-| **Jira** | — | Create tickets with approval | Auto-file on P1 incidents |
+| **Airflow** | Airflow REST API | `check_failures`, `list_dags`, `get_dag_runs`, `get_task_instances`, `get_task_logs`, `get_running_dags` | DAG status, run state, task logs |
+| **dbt** | dbt Cloud API + GitHub | `list_jobs`, `get_run`, `get_manifest`, `list_models`, `find_affected_models`, `check_recent_changes`, `get_project_graph`, `load_local_manifest` | Job runs, model lineage, recent changes |
+| **Snowflake** | Snowflake SQL API | `execute_query`, `get_query_history`, `get_query_profile`, `get_warehouse_usage`, `fetch_schemas`, `check_source_anomalies`, `get_query_plans`, `analyze_query_performance` | Query history, schema state, warehouse costs |
+| **Comms** | Slack, Jira, Confluence | `slack_post_message`, `slack_post_thread_reply`, `slack_get_channel_history`, `jira_create_issue`, `jira_get_issue`, `jira_search_issues`, `confluence_find_page`, `confluence_search_pages`, `format_incident_message` | Channel history (for context); posts alerts |
 
-See [docs/TRUST-TIERS.md](docs/TRUST-TIERS.md) for full permissions matrix and Snowflake/Airflow grant scripts.
+Each agent runs in its own isolated process (or Docker container). Agents never talk to each other — all coordination flows through the orchestrator via a filesystem message bus.
+
+See individual agent docs: [Airflow](agents/airflow/AGENT.md) · [dbt](agents/dbt/AGENT.md) · [Snowflake](agents/snowflake/AGENT.md) · [Comms](agents/comms/AGENT.md)
 
 ---
 
 ## Workflows
 
-**Incident Autopilot** detects Airflow failures, correlates root causes across your DAGs, source tables, and dbt models, then files a Jira ticket and Slack alert with full diagnosis — before your team wakes up.
+| Workflow | What It Does | Poll Interval | Agents Used |
+|---|---|---|---|
+| **Incident Autopilot** | Detects Airflow failures, diagnoses root cause, alerts Slack, runs autonomous retro | 120s | airflow, dbt, snowflake, comms |
+| **SLA Guardian** | Predicts pipeline SLA breaches from historical run times | 300s | airflow, comms |
+| **Cost Sentinel** | Monitors Snowflake credit burn, alerts on expensive queries | 600s | snowflake, comms |
+| **Pipeline Whisperer** | Watches Snowflake schemas for drift, finds affected dbt models | 900s | snowflake, dbt, comms |
+| **Knowledge Scribe** | Syncs dbt manifest to Confluence documentation | Nightly | dbt, comms |
 
-**Pipeline Whisperer** watches Snowflake schemas for drift, finds every dbt model affected by the change, rewrites them, and opens a PR with tests — all before the next dbt run breaks.
+### Autonomous Retro Analysis
 
-**Cost Sentinel** monitors Snowflake credit burn in real time, alerts on expensive queries, and kills runaway queries that exceed your threshold — with your approval or automatically within policy.
+When an incident is detected, DuckPipe automatically runs a **5-level retrospective** (5-whys):
 
-**SLA Guardian** predicts pipeline breaches before they happen by comparing current run progress against historical P95 timing, and alerts your team while there's still time to act.
+| Level | Question | Sub-Agents |
+|---|---|---|
+| 1 | What exactly happened? | Airflow failure analysis |
+| 2 | Why did it happen? | dbt lineage trace, Snowflake object checks |
+| 3 | What changed in the last 24h? | dbt recent changes, Snowflake schema anomalies |
+| 4 | What is the blast radius? | dbt dependency graph, downstream impact |
+| 5 | Has this happened before? | Historical incidents, Slack/Jira/Confluence context |
 
-**Knowledge Scribe** turns your dbt manifest into living Confluence documentation — model descriptions, column lineage, test coverage, freshness — updated every night or on every PR merge.
+Sub-agents are **dynamically selected** based on the question context — e.g., level 2 spawns a Snowflake access agent only if an upstream dependency failure is suspected.
 
-**Query Sage** responds to `@duckpipe why is X slow` in Slack with a plain-English explanation, rewritten SQL, and estimated credit savings — backed by actual query execution plans.
+Each level has a **45-second timeout** to prevent hangs. Results are persisted to the database after each level so the dashboard shows live progress.
+
+---
+
+## Setup Guide
+
+### Step 1: Environment Variables (`.env`)
+
+```bash
+# ── LLM Provider (required for retro analysis) ──
+OPENAI_API_KEY=sk-...
+
+# ── Airflow ──
+AIRFLOW_BASE_URL=http://localhost:8080          # your Airflow webserver URL
+AIRFLOW_USERNAME=duckpipe                        # Viewer role user
+AIRFLOW_PASSWORD=...
+
+# ── Snowflake ──
+SNOWFLAKE_ACCOUNT=myorg.us-east-1
+SNOWFLAKE_USER=DUCKPIPE_SVC
+SNOWFLAKE_PASSWORD=...                           # or use SNOWFLAKE_PRIVATE_KEY_PATH
+SNOWFLAKE_WAREHOUSE=COMPUTE_WH
+SNOWFLAKE_DATABASE=ANALYTICS
+SNOWFLAKE_ROLE=DUCKPIPE_READER
+
+# ── dbt Cloud ──
+DBT_API_TOKEN=dbtc_...
+DBT_ACCOUNT_ID=12345
+DBT_PROJECT_ID=67890
+
+# ── Slack ──
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...                         # for Socket Mode listener
+
+# ── Optional: Jira ──
+JIRA_BASE_URL=https://your-company.atlassian.net
+JIRA_EMAIL=duckpipe@company.com
+JIRA_API_TOKEN=...
+
+# ── Optional: Confluence ──
+CONFLUENCE_BASE_URL=https://your-company.atlassian.net/wiki
+CONFLUENCE_EMAIL=duckpipe@company.com
+CONFLUENCE_API_TOKEN=...
+
+# ── Optional: GitHub (for Pipeline Whisperer PRs) ──
+GITHUB_TOKEN=github_pat_...
+GITHUB_REPO=your-org/your-dbt-repo
+
+# ── Optional: Dashboard remote access ──
+DUCKPIPE_DASHBOARD_TOKEN=...                     # set to enable bearer auth
+```
+
+### Step 2: Configuration (`duckpipe.yaml`)
+
+```yaml
+duckpipe:
+  team_name: "my-data-team"
+  trust_tier: 1                                  # read-only — the only supported tier today
+
+secrets:
+  backend: "env"                                 # reads from .env file
+
+agents:
+  runtime: "process"                             # or "docker" / "podman"
+  timeout_seconds: 120
+  memory_limit_mb: 512
+
+integrations:
+  airflow:
+    enabled: true
+    base_url: "${AIRFLOW_BASE_URL}"
+    username: "${AIRFLOW_USERNAME}"
+    password: "${AIRFLOW_PASSWORD}"
+  snowflake:
+    enabled: true
+    account: "${SNOWFLAKE_ACCOUNT}"
+    user: "${SNOWFLAKE_USER}"
+    password: "${SNOWFLAKE_PASSWORD}"
+    role: "${SNOWFLAKE_ROLE}"
+    warehouse: "${SNOWFLAKE_WAREHOUSE}"
+    database: "${SNOWFLAKE_DATABASE}"
+  dbt:
+    enabled: true
+    cloud_url: "https://cloud.getdbt.com"
+    api_token: "${DBT_API_TOKEN}"
+    account_id: "${DBT_ACCOUNT_ID}"
+    project_id: "${DBT_PROJECT_ID}"
+  slack:
+    enabled: true
+    bot_token: "${SLACK_BOT_TOKEN}"
+    app_token: "${SLACK_APP_TOKEN}"
+    allowed_channels:
+      - "#data-incidents"
+      - "#data-engineering"
+  jira:
+    enabled: false                               # set true + add creds to enable
+    base_url: "${JIRA_BASE_URL}"
+    email: "${JIRA_EMAIL}"
+    api_token: "${JIRA_API_TOKEN}"
+  confluence:
+    enabled: false
+    base_url: "${CONFLUENCE_BASE_URL}"
+    email: "${CONFLUENCE_EMAIL}"
+    api_token: "${CONFLUENCE_API_TOKEN}"
+
+llm:
+  provider: "openai"
+  model: "gpt-4o-mini"
+  api_key: "${OPENAI_API_KEY}"
+
+workflows:
+  incident_autopilot:
+    enabled: true
+    poll_interval_seconds: 120
+    auto_page_on_p1: false
+  sla_guardian:
+    enabled: true
+    poll_interval_seconds: 300
+  cost_sentinel:
+    enabled: true
+    poll_interval_seconds: 600
+  pipeline_whisperer:
+    enabled: false                               # enable when ready
+  knowledge_scribe:
+    enabled: false
+```
+
+### Step 3: Start
+
+```bash
+npx tsx src/cli.ts start --dashboard
+# Dashboard available at http://localhost:9876
+```
+
+### Connection Guides
+
+Step-by-step guides with permissions, grant scripts, and troubleshooting:
+
+- [Connecting Airflow](docs/CONNECTING-AIRFLOW.md) — Cloud Composer, MWAA, Astronomer, self-hosted
+- [Connecting Snowflake](docs/CONNECTING-SNOWFLAKE.md) — key-pair auth, role grants, network policy
+- [Connecting dbt Cloud](docs/CONNECTING-DBT.md) — API token, account/project IDs
 
 ---
 
 ## Security
 
-DuckPipe runs in your network. Your credentials go: `.env` → memory → HTTPS to your API. They never touch disk, never appear in logs, never leave your machine or VPC. We don't even have a server to send them to.
+DuckPipe runs in your network. Your credentials go: `.env` → memory → HTTPS to your API. They never touch disk, never appear in logs, never leave your machine or VPC.
 
-Every action is logged to an append-only audit log before it executes. The audit log has SQLite triggers that prevent updates and deletes — not by convention, by enforcement. Agent containers run in isolation; they communicate only through filesystem IPC managed by the orchestrator.
+Every action is logged to an append-only audit log before it executes. SQLite triggers prevent updates and deletes — not by convention, by enforcement. Agents run in isolation; they communicate only through filesystem IPC managed by the orchestrator.
 
-Run `npx duckpipe verify` at any time to see exactly what DuckPipe can access and what it cannot. There's no trust-me — only show-me.
-
-### Enterprise Security Summary
+### Security Controls
 
 | Control | Implementation |
 |---|---|
-| **Credential isolation** | Secrets never written to disk; memory-only vault with env, HashiCorp Vault, AWS Secrets Manager backends |
-| **Agent sandboxing** | Each agent runs in its own Docker container with no inter-container network access |
-| **Audit immutability** | SQLite triggers prevent UPDATE/DELETE on audit_log; append-only enforced at database level |
-| **Input validation** | SQL injection prevention with parameterized identifiers; strict regex validation on all user inputs |
-| **Dashboard auth** | Bearer token authentication; binds to localhost-only when no token configured |
-| **No telemetry** | Zero outbound connections to Duckcode servers; fully self-hosted, fully air-gappable |
-| **Least privilege** | Read-only by default; write actions require explicit tier promotion and policy rules |
+| **Trust Tier 1** | Read-only enforced — no write actions possible at code level |
+| **Credential isolation** | Secrets never written to disk; memory-only vault |
+| **Agent sandboxing** | Each agent runs in its own process/container with scoped credentials |
+| **Audit immutability** | SQLite triggers prevent UPDATE/DELETE on audit_log |
+| **Input validation** | SQL injection prevention; strict regex on all identifiers |
+| **Dashboard auth** | Localhost-only by default; bearer token for remote access |
+| **No telemetry** | Zero outbound connections to Duckcode servers; fully air-gappable |
+| **Least privilege** | Read-only roles for Airflow (Viewer), Snowflake (DUCKPIPE_READER), dbt (read scopes) |
 
-For a complete security review, including threat model, data flow diagrams, and SLC review checklist, see [docs/SECURITY.md](docs/SECURITY.md).
+For the complete security review — threat model, data flow, SLC checklist, compliance mapping, and pen-test guidance — see [docs/SECURITY.md](docs/SECURITY.md) and [docs/SLC-REVIEW.md](docs/SLC-REVIEW.md).
 
 ---
 
 ## Observability Dashboard
 
-DuckPipe ships an embedded web dashboard at `http://localhost:9876` with:
+DuckPipe ships an embedded web dashboard at `http://localhost:9876`:
 
-- Real-time workflow monitoring via Server-Sent Events
-- Approval queue for Tier 2 supervised write actions
-- Agent health and container status
-- Audit log viewer with filters and CSV/JSON export
-- Setup wizard for first-run onboarding
-
-```bash
-npx duckpipe start    # dashboard available at http://localhost:9876
-```
-
----
-
-## Installation & Configuration
-
-### Environment Variables
-
-Copy `config-examples/.env.example` and fill in your credentials:
-
-```bash
-# Required
-AIRFLOW_BASE_URL=https://airflow.internal.company.com
-AIRFLOW_USERNAME=duckpipe
-AIRFLOW_PASSWORD=...
-SNOWFLAKE_ACCOUNT=myorg.us-east-1
-SNOWFLAKE_USER=DUCKPIPE_SVC
-SNOWFLAKE_PASSWORD=...              # or use SNOWFLAKE_PRIVATE_KEY_PATH for key-pair auth
-SNOWFLAKE_WAREHOUSE=COMPUTE_WH
-SNOWFLAKE_DATABASE=ANALYTICS
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_APP_TOKEN=xapp-...            # required for Slack Socket Mode listener
-DBT_API_TOKEN=dbt_...
-DBT_ACCOUNT_ID=12345
-DBT_PROJECT_ID=67890
-
-# Optional
-JIRA_BASE_URL=https://your-company.atlassian.net
-JIRA_EMAIL=duckpipe@company.com
-JIRA_API_TOKEN=...
-CONFLUENCE_BASE_URL=https://your-company.atlassian.net/wiki
-CONFLUENCE_EMAIL=duckpipe@company.com
-CONFLUENCE_API_TOKEN=...
-DUCKPIPE_DASHBOARD_TOKEN=...        # set to enable remote dashboard access with auth
-```
-
-### Configuration File
-
-Copy `config-examples/duckpipe.example.yaml` to `duckpipe.yaml` in the project root. The full reference includes trust tier, secrets backend, agent runtime, integration endpoints, and workflow schedules.
-
-### Connection Guides
-
-Step-by-step guides with exact permissions, grant scripts, and troubleshooting:
-
-- [Connecting Airflow](docs/CONNECTING-AIRFLOW.md) — Cloud Composer, MWAA, Astronomer, self-hosted
-- [Connecting Snowflake](docs/CONNECTING-SNOWFLAKE.md) — key-pair auth, role grants, network policy
-- [Connecting dbt Cloud](docs/CONNECTING-DBT.md) — API token, account/project IDs
+- **Incident timeline** — click any incident to see full diagnosis and retro analysis
+- **Retro viewer** — expandable investigation levels with sub-agent calls, facts, sources, and confidence
+- **Workflow monitoring** — real-time status via Server-Sent Events
+- **Agent health** — per-agent tool registration and connectivity status
+- **Audit log** — filterable action log with CSV/JSON export
 
 ---
 
@@ -223,7 +310,6 @@ Scheduler (cron/interval)
             ┌────────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
             │  Airflow   │  │   dbt    │  │Snowflake │  │  Comms   │
             │  Agent     │  │  Agent   │  │  Agent   │  │  Agent   │
-            │ (container)│  │(container)│  │(container)│  │(container)│
             └────────────┘  └──────────┘  └──────────┘  └──────────┘
                     │               │         │               │
                     ▼               ▼         ▼               ▼
@@ -231,21 +317,23 @@ Scheduler (cron/interval)
                              GitHub                      Confluence
 ```
 
+Agents communicate via a filesystem message bus (`bus/` directory). The orchestrator writes task JSON to `bus/agents/<name>/in/`, agents poll every 200ms, execute, and write results to `bus/agents/<name>/out/`.
+
 Full architecture documentation: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ---
 
-## Enterprise Adoption
+## Roadmap
 
-DuckPipe is built for enterprise data teams connecting to production systems. Before deploying:
+DuckPipe currently operates at **Tier 1 (read-only)**. Future tiers will add supervised and autonomous write capabilities:
 
-1. **Run `npx duckpipe verify`** — confirms every connection, every permission, every scope. Nothing hidden.
-2. **Start at Tier 1** — zero-risk read-only monitoring. Evaluate for days or weeks before promoting.
-3. **Review the SLC checklist** — [docs/SECURITY.md](docs/SECURITY.md) contains a full Software Lifecycle review package for your security team: threat model, data flow, compliance mapping, and penetration test guidance.
-4. **Use HashiCorp Vault or AWS Secrets Manager** — production secrets backends are built-in. The `env` backend is for development only.
-5. **Deploy on Kubernetes** — production manifests with RBAC, secrets, and health probes are in `config-examples/k8s/`.
+| Tier | Status | Description |
+|---|---|---|
+| **Tier 1 — Read-Only** | Available | Monitor, detect, diagnose, alert |
+| **Tier 2 — Supervised** | Planned | Write actions with Slack approval (retry tasks, kill queries, open PRs) |
+| **Tier 3 — Autonomous** | Planned | Policy-bounded auto-actions (auto-retry, auto-kill, auto-PR) |
 
-See [docs/SCENARIOS.md](docs/SCENARIOS.md) for real-world deployment examples.
+See [docs/TRUST-TIERS.md](docs/TRUST-TIERS.md) for the full roadmap.
 
 ---
 

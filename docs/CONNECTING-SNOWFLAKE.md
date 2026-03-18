@@ -54,24 +54,6 @@ GRANT ROLE DUCKPIPE_READER TO USER DUCKPIPE_SVC;
 
 A copy of this script is available at `scripts/generate-snowflake-grants.sql`.
 
-### Tier 2: DUCKPIPE_OPERATOR (Supervised Writes)
-
-When you enable Tier 2 and need to cancel queries or manage warehouses:
-
-```sql
--- Create operator role (inherits reader permissions)
-CREATE ROLE IF NOT EXISTS DUCKPIPE_OPERATOR;
-GRANT ROLE DUCKPIPE_READER TO ROLE DUCKPIPE_OPERATOR;
-
--- Warehouse operation (SUSPEND/RESUME, CANCEL_QUERY)
--- Does NOT allow: CREATE, DROP, ALTER TABLE, INSERT, UPDATE, DELETE
-GRANT OPERATE ON WAREHOUSE <WAREHOUSE> TO ROLE DUCKPIPE_OPERATOR;
-
--- Activate for the service user
-ALTER USER DUCKPIPE_SVC SET DEFAULT_ROLE = DUCKPIPE_OPERATOR;
-GRANT ROLE DUCKPIPE_OPERATOR TO USER DUCKPIPE_SVC;
-```
-
 ### Multiple Databases
 
 If DuckPipe needs to monitor multiple databases:
@@ -152,7 +134,7 @@ integrations:
     account: "${SNOWFLAKE_ACCOUNT}"
     user: "${SNOWFLAKE_USER}"
     private_key_path: "${SNOWFLAKE_PRIVATE_KEY_PATH}"
-    role: "DUCKPIPE_READER"          # or DUCKPIPE_OPERATOR for Tier 2
+    role: "DUCKPIPE_READER"
     warehouse: "${SNOWFLAKE_WAREHOUSE}"
     database: "${SNOWFLAKE_DATABASE}"
 ```
@@ -263,16 +245,6 @@ npx duckpipe verify --integration snowflake
 ✓ Snowflake connected (account: myorg.us-east-1)
   Role: DUCKPIPE_READER  Warehouse: COMPUTE_WH
   Permissions: SELECT ✓  OPERATE ✗  CREATE ✗  DROP ✗
-  Query history access: ✓
-  Tables visible: 312
-```
-
-### Expected Output (Tier 2)
-
-```
-✓ Snowflake connected (account: myorg.us-east-1)
-  Role: DUCKPIPE_OPERATOR  Warehouse: COMPUTE_WH
-  Permissions: SELECT ✓  OPERATE ✓  CREATE ✗  DROP ✗
   Query history access: ✓
   Tables visible: 312
 ```

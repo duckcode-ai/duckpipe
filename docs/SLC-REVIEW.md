@@ -31,15 +31,14 @@ This document is designed for enterprise security teams performing a Software Li
 |---|---|---|
 | **Data sensitivity** | Medium | Accesses query metadata, DAG configurations, and run logs. Does not read business data tables. |
 | **Credential exposure** | High | Holds API credentials for Airflow, Snowflake, dbt, Slack, Jira, Confluence |
-| **Write capability** | Configurable | Tier 1: none. Tier 2: human-approved. Tier 3: policy-bounded. |
+| **Write capability** | None | Tier 1 (read-only) is the only supported tier. No write actions possible. |
 | **Network exposure** | Low | No inbound ports required. Dashboard is localhost-only by default. |
 | **Supply chain risk** | Low | 6 runtime deps, all well-maintained, locked versions |
 
 ### Recommended Risk Rating
 
-- **Tier 1 deployment**: Low risk
-- **Tier 2 deployment**: Medium risk (mitigated by human approval)
-- **Tier 3 deployment**: Medium-High risk (mitigated by policy rules and audit)
+- **Tier 1 deployment (current)**: Low risk — read-only access to all integrations
+- Tiers 2 and 3 are on the roadmap but not yet implemented
 
 ---
 
@@ -137,10 +136,8 @@ This document is designed for enterprise security teams performing a Software Li
 | Control | Status | Evidence |
 |---|---|---|
 | Tier 1 blocks all writes | Implemented | `src/policy.ts` — returns allowed: false for all writes at Tier 1 |
-| Tier 2 requires Slack approval | Implemented | `src/orchestrator.ts` — ApprovalManager integration |
-| Tier 3 checks policy rules | Implemented | `src/policy.ts` — matches action against policy.yaml rules |
-| Tier change requires restart | Implemented | Config loaded at boot, not hot-reloaded |
-| Automated tests verify tier enforcement | Implemented | `tests/policy.test.ts`, `tests/orchestrator-approval.test.ts` |
+| Only Tier 1 supported | By design | Higher tiers not yet implemented; config accepts only tier 1 |
+| Automated tests verify tier enforcement | Implemented | `tests/policy.test.ts` |
 
 ---
 
@@ -243,13 +240,12 @@ DuckPipe does not process cardholder data. Scope Snowflake access to exclude dat
 
 ### For Data Engineering Team
 
-- [ ] Snowflake roles created (DUCKPIPE_READER and/or DUCKPIPE_OPERATOR)
-- [ ] Airflow service user created with appropriate role
+- [ ] Snowflake role created (DUCKPIPE_READER — SELECT only)
+- [ ] Airflow service user created with Viewer role
 - [ ] dbt Cloud service token generated
 - [ ] Slack bot created and added to required channels
 - [ ] `npx duckpipe verify` passes for all enabled integrations
-- [ ] Trust tier agreed upon with security team
-- [ ] Policy.yaml reviewed and approved (for Tier 3)
+- [ ] Trust tier confirmed as Tier 1 (read-only — the only supported tier)
 
 ---
 

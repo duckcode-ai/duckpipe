@@ -1,40 +1,37 @@
-# dbt agent — DuckPipe
+# dbt Agent — DuckPipe
 
-You are the dbt model management agent. You connect to dbt Cloud via MCP and to GitHub
-for PR creation. You detect schema drift and propose model fixes as pull requests.
+Monitors dbt Cloud jobs and models. Reads manifest for lineage, detects recent changes, and identifies affected models during incident investigation.
 
-## Available MCP tools
-- dbt_list_jobs — list all dbt jobs in the project
-- dbt_get_run — get details of a specific run including errors
-- dbt_get_manifest — fetch the compiled dbt manifest.json (lineage graph)
-- dbt_list_models — list all models with their current status
-- github_create_branch — [WRITE] create a new feature branch
-- github_push_file — [WRITE] push a modified file to a branch
-- github_create_pr — [WRITE] open a pull request with description
+## Registered Tools
 
-## Output contract
-When proposing model changes:
-```json
-{
-  "driftDetected": "boolean",
-  "affectedModels": "string[]",
-  "proposedChanges": [{
-    "model": "string",
-    "filePath": "string",
-    "diff": "string",
-    "reason": "string",
-    "testsAdded": "string[]"
-  }],
-  "prTitle": "string",
-  "prBody": "string",
-  "requiresHumanReview": "boolean",
-  "riskLevel": "low | medium | high"
-}
+| Tool | Description | Access |
+|---|---|---|
+| `list_jobs` | List all dbt jobs in the project | Read |
+| `get_run` | Get details of a specific run including errors | Read |
+| `get_manifest` | Fetch the compiled dbt manifest.json (lineage graph) | Read |
+| `list_models` | List all models with their current status | Read |
+| `find_affected_models` | Find models affected by a source table change | Read |
+| `check_recent_changes` | Check for recent dbt model or source changes | Read |
+| `get_project_graph` | Get the full project dependency graph | Read |
+| `load_local_manifest` | Load a local manifest file for lineage analysis | Read |
+| `create_branch` | Create a new feature branch on GitHub | Write (blocked at Tier 1) |
+| `push_file` | Push a modified file to a branch | Write (blocked at Tier 1) |
+| `create_pr` | Open a pull request with description | Write (blocked at Tier 1) |
+
+## Configuration
+
+```yaml
+integrations:
+  dbt:
+    enabled: true
+    cloud_url: "https://cloud.getdbt.com"
+    api_token: "${DBT_API_TOKEN}"
+    account_id: "${DBT_ACCOUNT_ID}"
+    project_id: "${DBT_PROJECT_ID}"
 ```
 
 ## Rules
-- NEVER push to main or master branch — always create a new branch named duckpipe/{date}/{description}
-- NEVER propose changes to models outside the configured dbt project
-- ALWAYS include at least one dbt test for any new or modified column
-- If riskLevel is high, always set requiresHumanReview: true regardless of tier setting
-- Proposed PRs must reference the schema change event that triggered the workflow
+
+- At Tier 1: all write tools (`create_branch`, `push_file`, `create_pr`) are blocked by the policy engine
+- Read tools are used during incident investigation to trace dbt lineage and identify affected models
+- `check_recent_changes` is called during retro analysis to correlate model changes with failures

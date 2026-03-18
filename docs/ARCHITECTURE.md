@@ -237,14 +237,26 @@ Event/Trigger
 
 ### Workflow Inventory
 
-| Workflow | Trigger | Agents Used | Write Actions |
+| Workflow | Trigger | Agents Used | Actions (Tier 1) |
 |---|---|---|---|
-| Incident Autopilot | Poll / webhook | airflow, dbt, snowflake, comms | Jira ticket, Slack alert, task retry |
-| Pipeline Whisperer | 15-min interval | snowflake, dbt, comms | GitHub PR, Slack notification |
-| Cost Sentinel | 10-min interval | snowflake, comms | Query cancel, Slack alert |
-| SLA Guardian | 5-min interval | airflow, comms | Slack warning |
-| Knowledge Scribe | Nightly cron | dbt, comms | Confluence pages |
-| Query Sage | Slack @mention | snowflake, comms | Slack reply, optional PR |
+| Incident Autopilot | Poll (120s) / webhook | airflow, dbt, snowflake, comms | Detect failures, diagnose, alert Slack, run autonomous retro |
+| SLA Guardian | Poll (300s) | airflow, comms | Predict SLA breaches, alert Slack |
+| Cost Sentinel | Poll (600s) | snowflake, comms | Monitor credit burn, alert on expensive queries |
+| Pipeline Whisperer | Poll (900s) | snowflake, dbt, comms | Detect schema drift, report affected models |
+| Knowledge Scribe | Nightly cron | dbt, comms | Read dbt manifest for lineage (reporting only) |
+
+### Autonomous Retro Analysis
+
+When Incident Autopilot detects a failure, it triggers an autonomous retrospective analysis:
+
+1. **Retro Runner** (`src/retro-runner.ts`) orchestrates a 5-level investigation (5-whys)
+2. Each level asks a progressively deeper question about the incident
+3. **Investigator** (`src/investigator.ts`) runs playbook-driven data collection per level
+4. **Sub-Agents** (`src/subagents.ts`) fan out parallel agent tool calls (airflow, dbt, snowflake, comms)
+5. An LLM synthesizes facts into an answer per level and checks sufficiency
+6. Results are persisted to the database after each level for live dashboard updates
+
+Playbooks are dynamically selected based on the question context (e.g., `airflow-failure-trace`, `dbt-lineage-trace`, `missing-object-trace`). Each level has a 45-second timeout to prevent hangs.
 
 ---
 
@@ -310,20 +322,24 @@ Transient. Created fresh on startup. Contains only in-flight messages. Added to 
 |---|---|---|
 | Entry point | `src/index.ts` | Init vault → orchestrator → scheduler → listeners → dashboard |
 | CLI | `src/cli.ts` | Command parser: start, verify, setup, audit, dashboard |
-| Orchestrator | `src/orchestrator.ts` | Agent lifecycle, bus routing, policy check, approval flow |
+| Orchestrator | `src/orchestrator.ts` | Agent lifecycle, bus routing, policy check |
 | Bus | `src/bus.ts` | FileTransport implementation, message creation |
-| Policy | `src/policy.ts` | Tier enforcement, policy.yaml parsing, rule matching |
+| Policy | `src/policy.ts` | Tier enforcement (Tier 1: blocks all writes) |
 | Audit | `src/audit.ts` | Append-only log, export to JSON/CSV |
 | Vault | `src/vault.ts` | Credential resolution (env, file, hashicorp, aws) |
 | Scheduler | `src/scheduler.ts` | Cron/interval triggers for workflows |
 | Router | `src/router.ts` | Routes events to correct workflow |
-| Database | `src/db.ts` | SQLite state (workflow runs, dedup, schema snapshots) |
+| Database | `src/db.ts` | SQLite state (workflow runs, dedup, schema snapshots, incidents, retro reports) |
 | Verify | `src/verify.ts` | Connection and permission checker |
-| Docker | `src/docker.ts` | Agent container lifecycle management |
+| Docker | `src/docker.ts` | Agent container/process lifecycle management |
 | Server | `src/server.ts` | Dashboard HTTP server, auth, SSE |
-| API | `src/api.ts` | REST endpoints, health checks, CORS |
+| API | `src/api.ts` | REST endpoints (incidents, retro, health, audit) |
+| Retro Runner | `src/retro-runner.ts` | Autonomous 5-level retro analysis (5-whys) with per-level timeouts |
+| Investigator | `src/investigator.ts` | Playbook-driven investigation per level (dynamic playbook selection) |
+| Sub-Agents | `src/subagents.ts` | Parallel sub-agent fan-out for investigation questions |
+| LLM | `src/llm.ts` | OpenAI integration for retro analysis and sufficiency checks |
 | Slack | `src/slack-listener.ts` | Socket Mode listener for @duckpipe |
-| Approval | `src/approval.ts` | Slack-based approval flow for Tier 2 |
+| Approval | `src/approval.ts` | Slack-based approval flow (reserved for future Tier 2) |
 
 ---
 

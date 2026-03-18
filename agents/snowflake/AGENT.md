@@ -1,38 +1,39 @@
-# Snowflake agent — DuckPipe
+# Snowflake Agent — DuckPipe
 
-You monitor Snowflake query performance and credit consumption. In Tier 2+, you can kill
-runaway queries and resize warehouses with approval.
+Monitors Snowflake query performance, credit consumption, and schema state. Used during incident investigation for source anomaly detection and object existence checks.
 
-## Available MCP tools
-- snowflake_query — execute a SELECT query (read-only role enforced at DB level)
-- snowflake_get_query_history — fetch QUERY_HISTORY from SNOWFLAKE.ACCOUNT_USAGE
-- snowflake_get_query_profile — fetch execution plan for a specific query_id
-- snowflake_cancel_query — [WRITE] cancel a running query by query_id
-- snowflake_get_warehouse_usage — get credit consumption by warehouse
+## Registered Tools
 
-## Output contract
-```json
-{
-  "expensiveQueries": [{
-    "queryId": "string",
-    "user": "string",
-    "warehouse": "string",
-    "creditsConsumed": "number",
-    "runtimeSeconds": "number",
-    "queryPreview": "string",
-    "optimizationSuggestion": "string",
-    "estimatedCreditSavings": "number"
-  }],
-  "totalCredits24h": "number",
-  "anomalyDetected": "boolean",
-  "anomalyDescription": "string | null",
-  "killCandidates": "string[]"
-}
+| Tool | Description | Access |
+|---|---|---|
+| `execute_query` | Execute a SELECT query (read-only role enforced at DB level) | Read |
+| `get_query_history` | Fetch QUERY_HISTORY from SNOWFLAKE.ACCOUNT_USAGE | Read |
+| `get_query_profile` | Fetch execution plan for a specific query_id | Read |
+| `get_warehouse_usage` | Get credit consumption by warehouse | Read |
+| `fetch_schemas` | List schemas and tables in configured databases | Read |
+| `check_source_anomalies` | Check source tables for row count or freshness anomalies | Read |
+| `get_query_plans` | Get query execution plans for performance analysis | Read |
+| `analyze_query_performance` | Analyze query performance patterns | Read |
+| `cancel_query` | Cancel a running query by query_id | Write (blocked at Tier 1) |
+
+## Configuration
+
+```yaml
+integrations:
+  snowflake:
+    enabled: true
+    account: "${SNOWFLAKE_ACCOUNT}"
+    user: "${SNOWFLAKE_USER}"
+    password: "${SNOWFLAKE_PASSWORD}"       # or use private_key_path for key-pair auth
+    role: "DUCKPIPE_READER"
+    warehouse: "${SNOWFLAKE_WAREHOUSE}"
+    database: "${SNOWFLAKE_DATABASE}"
+    watched_databases: []                    # additional databases to monitor
 ```
 
 ## Rules
-- NEVER run any query that is not a SELECT or a SYSTEM$ function
-- NEVER cancel a query without orchestrator policy approval
-- NEVER access tables outside the configured database list
-- When suggesting SQL optimizations, always show the rewritten query, not just advice
-- Credit thresholds for kill decisions come from config, not your judgment
+
+- At Tier 1: `cancel_query` is blocked by the policy engine
+- Only SELECT queries are executed — enforced at both application level (SQL validation) and database level (role grants)
+- All identifiers are validated with strict regex to prevent SQL injection
+- `check_source_anomalies` is called during retro analysis to detect upstream data issues

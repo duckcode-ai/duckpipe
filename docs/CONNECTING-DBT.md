@@ -22,10 +22,11 @@ Step-by-step guide to connect DuckPipe to dbt Cloud. Covers API token creation, 
 4. Name: `DuckPipe Service Token`
 5. Select permission sets:
 
-| Trust Tier | Required Permissions |
-|---|---|
-| Tier 1 (read-only) | `Job Admin` (read access to jobs and runs), `Member` (read access to projects) |
-| Tier 2+ (with Pipeline Whisperer) | Same as Tier 1 (writes go through GitHub, not dbt Cloud API) |
+| Required Permissions |
+|---|
+| `Job Admin` (read access to jobs and runs), `Member` (read access to projects) |
+
+These are read-only scopes. DuckPipe does not trigger dbt runs via the API.
 
 6. Click **Save**
 7. Copy the token immediately — it is shown only once

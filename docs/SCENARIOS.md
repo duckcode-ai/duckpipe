@@ -1,6 +1,6 @@
 # DuckPipe Enterprise Scenarios
 
-Real-world deployment scenarios for enterprise data teams. Each scenario includes the problem, DuckPipe configuration, trust tier, and expected outcome.
+Real-world deployment scenarios for enterprise data teams. DuckPipe currently operates at **Tier 1 (read-only)**. Scenarios marked as roadmap require Tier 2 or 3, which are not yet implemented.
 
 ---
 
@@ -73,13 +73,15 @@ No manual investigation needed. The engineer can decide whether to retry from be
 
 ---
 
-## Scenario 2: Snowflake Cost Control (Tier 2)
+## Scenario 2: Snowflake Cost Control (Tier 2 — Roadmap)
+
+> **Requires Tier 2 (Supervised Writes)** — not yet available. Currently, DuckPipe can detect and alert on expensive queries at Tier 1 but cannot cancel them.
 
 ### Problem
 
 A fintech company spends $180K/month on Snowflake. Analysts occasionally run unoptimized queries that consume 500+ credits in a single execution. By the time anyone notices, the monthly budget is blown. The data platform team needs real-time cost monitoring with the ability to kill runaway queries — but only after a human approves.
 
-### DuckPipe Solution
+### DuckPipe Solution (Future)
 
 Deploy DuckPipe at Tier 2 (supervised writes). The Cost Sentinel workflow:
 
@@ -146,13 +148,15 @@ Monday 8am: weekly cost report posted to `#data-costs` with breakdown by user, w
 
 ---
 
-## Scenario 3: Schema Drift Auto-Fix (Tier 3)
+## Scenario 3: Schema Drift Auto-Fix (Tier 3 — Roadmap)
+
+> **Requires Tier 3 (Autonomous)** — not yet available. Currently, DuckPipe can detect schema drift and report affected models at Tier 1 but cannot create PRs.
 
 ### Problem
 
 A healthcare analytics company has 200+ dbt models sourcing from a Snowflake data warehouse. Upstream teams occasionally add, rename, or drop columns in source tables without notifying the analytics team. The next dbt run fails, breaking dashboards and reports. The analytics team spends 2-3 hours per incident manually updating models.
 
-### DuckPipe Solution
+### DuckPipe Solution (Future)
 
 Deploy DuckPipe at Tier 3 with autonomous policy for low-risk drift fixes. The Pipeline Whisperer workflow:
 
@@ -267,13 +271,15 @@ The on-call engineer scales up the Snowflake warehouse before the SLA is breache
 
 ---
 
-## Scenario 5: Automated Documentation (Tier 2)
+## Scenario 5: Automated Documentation (Tier 2 — Roadmap)
+
+> **Requires Tier 2 (Supervised Writes)** — not yet available. Currently, DuckPipe can read dbt manifests for lineage understanding at Tier 1 but cannot create Confluence pages.
 
 ### Problem
 
 An insurance company has 400+ dbt models across 5 projects. Documentation in Confluence is always outdated. New team members spend weeks understanding the data model. The documentation team cannot keep up with weekly schema changes.
 
-### DuckPipe Solution
+### DuckPipe Solution (Future)
 
 Deploy DuckPipe at Tier 2. The Knowledge Scribe workflow:
 
@@ -379,25 +385,25 @@ Suggestion: Add clustering key on raw.events(event_date)
 
 ## Deployment Patterns
 
-### Pattern A: Start Small, Grow Trust
+### Pattern A: Start with Tier 1 (Recommended)
 
-1. **Week 1**: Deploy Tier 1 for incident monitoring only
-2. **Week 2-4**: Evaluate alert quality, tune configuration
-3. **Month 2**: Promote to Tier 2 for cost control (with Slack approval)
-4. **Month 3**: Add Pipeline Whisperer and Knowledge Scribe
-5. **Month 4**: Promote specific actions to Tier 3 (auto-retry ingestion failures)
+1. **Week 1**: Deploy Tier 1 for incident monitoring only (Incident Autopilot + SLA Guardian)
+2. **Week 2-4**: Evaluate alert quality, tune poll intervals, review retro analysis accuracy
+3. **Month 2**: Enable Cost Sentinel for Snowflake cost monitoring
+4. **Month 3**: Enable Pipeline Whisperer for schema drift detection (Tier 1 reporting)
+5. **Future**: Promote to Tier 2 when available for supervised write actions
 
 ### Pattern B: Team-Scoped Deployment
 
 Deploy separate DuckPipe instances per team:
 
-| Instance | Team | Tier | Integrations |
+| Instance | Team | Integrations | Focus |
 |---|---|---|---|
-| duckpipe-ingestion | Data Engineering | Tier 2 | Airflow, Snowflake, Slack |
-| duckpipe-analytics | Analytics | Tier 1 | Snowflake, Slack, dbt |
-| duckpipe-platform | Platform | Tier 3 | All integrations |
+| duckpipe-ingestion | Data Engineering | Airflow, Snowflake, Slack | DAG failure detection |
+| duckpipe-analytics | Analytics | Snowflake, Slack, dbt | Cost monitoring, query analysis |
+| duckpipe-platform | Platform | All integrations | Full observability |
 
-Each instance has its own `duckpipe.yaml`, `policy.yaml`, and credentials scoped to that team's resources.
+Each instance has its own `duckpipe.yaml` and credentials scoped to that team's resources.
 
 ### Pattern C: Kubernetes Production
 

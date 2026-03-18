@@ -85,7 +85,7 @@ Edit `.env` with your credentials. Required variables depend on which integratio
 | `SNOWFLAKE_WAREHOUSE` | Snowflake monitoring | `COMPUTE_WH` |
 | `SNOWFLAKE_DATABASE` | Snowflake monitoring | `ANALYTICS` |
 | `SLACK_BOT_TOKEN` | Slack alerts | `xoxb-...` |
-| `SLACK_APP_TOKEN` | Slack listener (Tier 2+) | `xapp-...` |
+| `SLACK_APP_TOKEN` | Slack Socket Mode listener | `xapp-...` |
 | `DBT_API_TOKEN` | dbt Cloud monitoring | `dbtc_...` |
 | `DBT_ACCOUNT_ID` | dbt Cloud monitoring | `12345` |
 | `DBT_PROJECT_ID` | dbt Cloud monitoring | `67890` |
@@ -114,26 +114,52 @@ Key settings to review:
 
 ```yaml
 duckpipe:
-  trust_tier: 1                    # start with read-only
+  team_name: "my-data-team"
+  trust_tier: 1                    # read-only (the only supported tier)
 
 secrets:
   backend: "env"                   # use "hashicorp-vault" for production
 
 agents:
-  runtime: "docker"                # or "podman" or "process"
+  runtime: "process"               # or "docker" / "podman"
+  timeout_seconds: 120
 
 integrations:
   airflow:
-    enabled: true                  # set false to skip
+    enabled: true
+    base_url: "${AIRFLOW_BASE_URL}"
+    username: "${AIRFLOW_USERNAME}"
+    password: "${AIRFLOW_PASSWORD}"
   snowflake:
     enabled: true
+    account: "${SNOWFLAKE_ACCOUNT}"
+    user: "${SNOWFLAKE_USER}"
+    password: "${SNOWFLAKE_PASSWORD}"
+    role: "DUCKPIPE_READER"
+    warehouse: "${SNOWFLAKE_WAREHOUSE}"
+    database: "${SNOWFLAKE_DATABASE}"
   dbt:
     enabled: true
+    cloud_url: "https://cloud.getdbt.com"
+    api_token: "${DBT_API_TOKEN}"
+    account_id: "${DBT_ACCOUNT_ID}"
+    project_id: "${DBT_PROJECT_ID}"
   slack:
     enabled: true
+    bot_token: "${SLACK_BOT_TOKEN}"
     allowed_channels:
       - "#data-incidents"
       - "#data-engineering"
+
+llm:
+  provider: "openai"
+  model: "gpt-4o-mini"
+  api_key: "${OPENAI_API_KEY}"
+
+workflows:
+  incident_autopilot:
+    enabled: true
+    poll_interval_seconds: 120
 ```
 
 ### 5. Verify Connections
@@ -251,11 +277,11 @@ Before deploying to production:
 - [ ] Use HashiCorp Vault or AWS Secrets Manager for credentials (not `.env`)
 - [ ] Set `DUCKPIPE_DASHBOARD_TOKEN` if the dashboard will be accessible remotely
 - [ ] Deploy behind a reverse proxy (nginx, traefik) with TLS termination
-- [ ] Set `trust_tier: 1` initially; promote to Tier 2 after validation
+- [ ] Confirm `trust_tier: 1` (read-only — the only supported tier)
 - [ ] Run `npx duckpipe verify` and review all permissions
 - [ ] Configure `allowed_dags` and `watched_databases` to scope access
 - [ ] Set up audit log exports to your SIEM
-- [ ] Review `docs/SECURITY.md` SLC checklist with your security team
+- [ ] Review `docs/SECURITY.md` and `docs/SLC-REVIEW.md` with your security team
 
 ---
 
